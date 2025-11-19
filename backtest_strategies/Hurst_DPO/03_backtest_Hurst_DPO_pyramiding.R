@@ -1,6 +1,5 @@
 # ==============================================================================
-# MONTE CARLO PERMUTATION TEST (MCPT) - Ichimoku STRATEGIE
-# Mit vollständigem Pyramiding & Advanced Exit Strategies
+# Backtest - Hurst-DPO Strategy mit Advanced Pyramiding & Exit Strategies
 # ==============================================================================
 
 rm(list=ls())
@@ -16,15 +15,14 @@ library(lubridate)
 library(TTR)
 library(PerformanceAnalytics)
 library(tictoc)
-library(scales)
 library(pracma)
 library(data.table)
 
 cat("\n")
 cat("########################################################################\n")
 cat("#                                                                      #\n")
-cat("#      MCPT für Ichimoku Strategie mit Pyramiding                    #\n")
-cat("#      Mit Advanced Exit Strategies & Risk Management                 #\n")
+cat("#      Backtest für Hurst-DPO Strategie (15 Min Intraday)            #\n")
+cat("#      mit Breakout/Consecutive Pyramiding & Advanced Exits           #\n")
 cat("#                                                                      #\n")
 cat("########################################################################\n\n")
 
@@ -32,73 +30,17 @@ cat("########################################################################\n\
 # KONFIGURATION
 # ==============================================================================
 
-# MCPT-Parameter
-N_PERMUTATIONS <- 300
-METRIC <- "profit_factor"  # "sharpe_ratio", "total_return", "profit_factor"
-
-# Ichimoku Parameter (Best from Training)
-CONVERSION_PERIOD <- 20
-BASE_PERIOD <- 23
-LEADING_SPAN_B <- 44
-DISPLACEMENT <- 33
-
-# Risk Management Parameter
-ATR_PERIOD <- 14
-ADX_PERIOD <- 14
-CHANDELIER_PERIOD <- 22
-STOP_LOSS_ATR_MULT <- 3.0
-
-# ADX/RSI Filter
-ADX_THRESHOLD_LONG <- 19
-ADX_THRESHOLD_SHORT <- 22
-USE_RSI_FILTER <- TRUE
-RSI_LONG <- 55
-RSI_SHORT <- 45
-USE_RSI_MOMENTUM <- TRUE
-RSI_MOMENTUM_THRESHOLD <- -2
-USE_ADX_MOMENTUM <- TRUE
-ADX_MOMENTUM_THRESHOLD <- -1
-
-# Pyramiding Parameter
-USE_PYRAMIDING <- TRUE
-PYRAMID_METHOD <- "breakout"  # "breakout", "consecutive", "none"
-MAX_PYRAMID_ORDERS <- 3
-PYRAMID_SPACING_ATR <- 0.5
-PYRAMID_SIZE_MULTIPLIER <- 0.5
-CONSECUTIVE_BARS <- 2
-BREAKOUT_LOOKBACK <- 20
-
-# Exit Strategy
-EXIT_STRATEGY <- "chandelier"  # "chandelier", "breakeven_trailing"
-CHANDELIER_MULTIPLIER <- 3.0
-BREAKEVEN_TRIGGER_ATR <- 1.5
-BREAKEVEN_OFFSET_ATR <- 0.2
-TRAILING_STOP_ATR_MULT <- 2.0
-TRAILING_START_ATR_MULT <- 1.5
-
-# Take Profit
-TP_STRATEGY <- "full"  # "full", "partial"
-FULL_TP_ATR_MULT <- 4.5
-PARTIAL_TP_1_ATR <- 2.0
-PARTIAL_TP_1_SIZE <- 0.33
-PARTIAL_TP_2_ATR <- 3.5
-PARTIAL_TP_2_SIZE <- 0.33
-
-# Time Settings
-CLOSE_TIME_HOUR <- 22
-MAX_BARS_IN_TRADE <- 100
-
-# Train/Test Jahre
 TRAIN_START_YEAR <- 2023
 TRAIN_END_YEAR <- 2024
 TEST_YEAR <- 2025
 
-# Datenpfade
 input_path <- file.path("C:/Users/maxib/OneDrive/Dokumente/Finance/capitalcom_backtesting", "api-data")
 output_path <- file.path("C:/Users/maxib/OneDrive/Dokumente/Finance/R ML Trading Complete", "labelled_data")
 EPIC <- "GOLD"
 INTERVAL <- "MINUTE_15"
 filename <- paste0(EPIC, "_", INTERVAL, ".csv")
+
+source(file.path("C:/Users/maxib/OneDrive/Dokumente/Finance/R ML Trading Complete", "xx_strategies_signals.R"))
 
 # ==============================================================================
 # SCHRITT 1: DATEN LADEN
@@ -144,45 +86,78 @@ cat(sprintf("Test: %d Bars (%s bis %s)\n\n",
             max(test_data$date)))
 
 # ==============================================================================
-# INDIKATOREN BERECHNEN (ICHIMOKU)
+# Indikatoren Funktionen
+# ==============================================================================
+
+calculate_hurst <- function(price, n = 100) {
+  if(length(price) < n) return(rep(NA, length(price)))
+
+  hurst <- rep(NA, length(price))
+  for(i in n:length(price)) {
+    ts <- price[(i-n+1):i]
+
+    # R/S Analysis
+    lags <- c(10, 20, 30, 40, 50)
+    rs <- numeric(length(lags))
+
+    for(j in seq_along(lags)) {
+      lag <- lags[j]
+      if(lag >= length(ts)) next
+
+      # Calculate R/S for this lag
+      chunks <- split(ts, ceiling(seq_along(ts) / lag))
+      rs_values <- sapply(chunks, function(chunk) {
+        if(length(chunk) < 2) return(NA)
+        mean_chunk <- mean(chunk)
+        cumdev <- cumsum(chunk - mean_chunk)
+        R <- max(cumdev) - min(cumdev)
+        S <- sd(chunk)
+        if(S == 0 || is.na(S)) return(NA)
+        return(R / S)
+      })
+      rs[j] <- mean(rs_values, na.rm = TRUE)
+    }
+
+    # Linear regression to find Hurst
+    valid <- !is.na(rs) & rs > 0
+    if(sum(valid) >= 3) {
+      fit <- lm(log(rs[valid]) ~ log(lags[valid]))
+      hurst[i] <- coef(fit)[2]
+    }
+  }
+  return(hurst)
+}
+
+calculate_dpo <- function(close, n = 20) {
+  displaced_ma <- SMA(close, n)
+  shift <- floor(n/2) + 1
+  dpo <- close - lag(displaced_ma, shift)
+  return(as.numeric(dpo))
+}
+
+# ==============================================================================
+# INDIKATOREN BERECHNEN
 # ==============================================================================
 
 calculate_indicators <- function(data,
-                                 conversion_period = 20,
-                                 base_period = 23,
-                                 leading_span_b = 44,
-                                 displacement = 33,
+                                 hurst_period = 100,
+                                 dpo_period = 20,
+                                 lookback_slope = 3,
                                  atr_period = 14,
                                  adx_period = 14,
                                  chandelier_period = 22) {
 
-  # Ichimoku-Komponenten
-  data$tenkan_sen <- (runMax(data$high, conversion_period) +
-                        runMin(data$low, conversion_period)) / 2
-
-  data$kijun_sen <- (runMax(data$high, base_period) +
-                       runMin(data$low, base_period)) / 2
-
-  data$senkou_span_a <- lag((data$tenkan_sen + data$kijun_sen) / 2,
-                            displacement)
-
-  data$senkou_span_b <- lag((runMax(data$high, leading_span_b) +
-                               runMin(data$low, leading_span_b)) / 2,
-                            displacement)
-
-  data$chikou_span <- lead(data$close, displacement)
-
-  # ATR
+  # Basis-Indikatoren
+  data$hurst <- calculate_hurst(data$close, n = hurst_period)
+  data$dpo <- calculate_dpo(data$close, n = dpo_period)
+  data$price_slope <- (data$close - lag(data$close, lookback_slope)) / lookback_slope
   data$atr <- ATR(cbind(data$high, data$low, data$close), n = atr_period)[, "atr"]
-
-  # ADX
   data$adx <- ADX(cbind(data$high, data$low, data$close), n = adx_period)[, "ADX"]
-
-  # RSI
-  data$rsi <- RSI(data$close, n = 14)
 
   # Zusätzliche Indikatoren für Pyramiding/Exits
   data$close_change <- c(NA, diff(data$close))
+
+  # Chandelier Exit Berechnung
   data$highest_high <- runMax(data$high, chandelier_period)
   data$lowest_low <- runMin(data$low, chandelier_period)
 
@@ -190,102 +165,108 @@ calculate_indicators <- function(data,
 }
 
 # ==============================================================================
-# SIGNALE GENERIEREN MIT PYRAMIDING & EXITS (VOLLSTÄNDIG AUS 03_BACKTEST)
+# SIGNALE GENERIEREN MIT PYRAMIDING & EXITS
 # ==============================================================================
 
 generate_signals <- function(data,
-                             adx_threshold_long = 19,
-                             adx_threshold_short = 22,
-                             use_rsi_filter = TRUE,
-                             rsi_short = 70,
-                             rsi_long = 51,
-                             use_rsi_momentum = TRUE,
-                             rsi_momentum_threshold = -2,
-                             use_adx_momentum = TRUE,
-                             adx_momentum_threshold = -1,
+                             # Entry Signal Parameter
+                             hurst_threshold = 0.55,
+                             use_price_confirmation = TRUE,
+                             use_adx_filter = FALSE,
+                             adx_threshold = 20,
+
+                             # Initial Stop Loss
                              stop_loss_atr_mult = 3.0,
+
+                             # Pyramiding Parameter
                              use_pyramiding = TRUE,
-                             pyramid_method = "breakout",
+                             pyramid_method = "breakout",  # "breakout", "consecutive", "none"
                              max_pyramid_orders = 3,
                              pyramid_spacing_atr = 0.5,
                              pyramid_size_multiplier = 0.5,
+
+                             # Pyramiding: Consecutive
                              consecutive_bars = 2,
+
+                             # Pyramiding: Breakout
                              breakout_lookback = 20,
-                             exit_strategy = "chandelier",
+
+                             # Exit Strategy
+                             exit_strategy = "chandelier",  # "chandelier", "breakeven_trailing"
+
+                             # Chandelier Exit
                              chandelier_multiplier = 3.0,
                              chandelier_period = 22,
+
+                             # Breakeven + Trailing
                              breakeven_trigger_atr = 1.5,
                              breakeven_offset_atr = 0.2,
                              trailing_stop_atr_mult = 2.0,
                              trailing_start_atr_mult = 1.5,
-                             tp_strategy = "full",
+
+                             # Take Profit Strategy
+                             tp_strategy = "full",  # "full", "partial"
                              full_tp_atr_mult = 4.5,
+
+                             # Partial TP
                              partial_tp_1_atr = 2.0,
                              partial_tp_1_size = 0.33,
                              partial_tp_2_atr = 3.5,
                              partial_tp_2_size = 0.33,
+
+                             # Time Exit
                              close_time_hour = 22,
                              max_bars_in_trade = 100) {
 
   dt <- as.data.table(data)
   n <- nrow(dt)
 
-  # Vektorisierte Signal-Generierung (ICHIMOKU)
-  dt[, tenkan_cross_up := tenkan_sen > kijun_sen & shift(tenkan_sen, 1) <= shift(kijun_sen, 1)]
-  dt[, tenkan_cross_down := tenkan_sen < kijun_sen & shift(tenkan_sen, 1) >= shift(kijun_sen, 1)]
+  # ==========================================
+  # VEKTORISIERTE SIGNAL-GENERIERUNG
+  # ==========================================
 
-  dt[, price_above_cloud := close > pmax(senkou_span_a, senkou_span_b, na.rm = TRUE)]
-  dt[, price_below_cloud := close < pmin(senkou_span_a, senkou_span_b, na.rm = TRUE)]
+  dt[, dpo_lag := shift(dpo, 1)]
+  dt[, hurst_trending := hurst > hurst_threshold]
 
-  dt[, adx_filter_long := adx >= adx_threshold_long]
-  dt[, adx_filter_short := adx >= adx_threshold_short]
-
-  if (use_adx_momentum) {
-    dt[, adx_momentum := adx - shift(adx, 1)]
-    dt[, adx_momentum_filter := adx_momentum > adx_momentum_threshold]
+  if (use_adx_filter) {
+    dt[, adx_ok := adx >= adx_threshold]
   } else {
-    dt[, adx_momentum_filter := TRUE]
+    dt[, adx_ok := TRUE]
   }
 
-  if (use_rsi_filter) {
-    dt[, rsi_filter_long := rsi > rsi_long]
-    dt[, rsi_filter_short := rsi < rsi_short]
+  if (use_price_confirmation) {
+    dt[, price_rising := price_slope > 0]
+    dt[, price_falling := price_slope < 0]
   } else {
-    dt[, rsi_filter_long := TRUE]
-    dt[, rsi_filter_short := TRUE]
+    dt[, price_rising := TRUE]
+    dt[, price_falling := TRUE]
   }
 
-  if (use_rsi_momentum) {
-    dt[, rsi_momentum := rsi - shift(rsi, 1)]
-    dt[, rsi_momentum_long := rsi_momentum > rsi_momentum_threshold]
-    dt[, rsi_momentum_short := rsi_momentum < -rsi_momentum_threshold]
-  } else {
-    dt[, rsi_momentum_long := TRUE]
-    dt[, rsi_momentum_short := TRUE]
-  }
-
-  # Entry Signals (ICHIMOKU)
+  # Entry Signals - Hurst-DPO Strategy
   dt[, signal_raw := 0]
-  dt[tenkan_cross_up == TRUE &
-       price_above_cloud == TRUE &
-       adx_filter_long == TRUE &
-       adx_momentum_filter == TRUE &
-       rsi_filter_long == TRUE &
-       rsi_momentum_long == TRUE,
+
+  # Long: Hurst shows trending + DPO crosses above 0 + price rising
+  dt[hurst_trending == TRUE &
+       dpo_lag < 0 & dpo > 0 &
+       price_rising == TRUE &
+       adx_ok == TRUE,
      signal_raw := 1]
 
-  dt[tenkan_cross_down == TRUE &
-       price_below_cloud == TRUE &
-       adx_filter_short == TRUE &
-       adx_momentum_filter == TRUE &
-       rsi_filter_short == TRUE &
-       rsi_momentum_short == TRUE,
+  # Short: Hurst shows trending + DPO crosses below 0 + price falling
+  dt[hurst_trending == TRUE &
+       dpo_lag > 0 & dpo < 0 &
+       price_falling == TRUE &
+       adx_ok == TRUE,
      signal_raw := -1]
 
+  # Chandelier Exit Berechnung
   dt[, chandelier_long := highest_high - (chandelier_multiplier * atr)]
   dt[, chandelier_short := lowest_low + (chandelier_multiplier * atr)]
 
-  # Position Management
+  # ==========================================
+  # POSITION MANAGEMENT
+  # ==========================================
+
   position <- integer(n)
   entry_price <- numeric(n)
   stop_loss <- numeric(n)
@@ -299,6 +280,7 @@ generate_signals <- function(data,
   take_profit[] <- NA_real_
   exit_reason_vec[] <- ""
 
+  # Trade State
   current_position <- 0L
   current_entry <- NA_real_
   current_sl <- NA_real_
@@ -314,6 +296,7 @@ generate_signals <- function(data,
   partial_tp_1_done <- FALSE
   partial_tp_2_done <- FALSE
 
+  # Pre-extract vectors
   signal_raw_vec <- dt$signal_raw
   close_vec <- dt$close
   high_vec <- dt$high
@@ -324,9 +307,15 @@ generate_signals <- function(data,
   chandelier_long_vec <- dt$chandelier_long
   chandelier_short_vec <- dt$chandelier_short
 
+  # ==========================================
+  # MAIN LOOP
+  # ==========================================
+
   for (i in 2:n) {
 
-    # Time-based exit
+    # ========================================
+    # TIME-BASED EXIT (22:00)
+    # ========================================
     if (current_position != 0L && !is.na(hour_vec[i]) && hour_vec[i] == close_time_hour) {
       current_position <- 0L
       exit_reason_vec[i] <- "Time_22h"
@@ -344,7 +333,9 @@ generate_signals <- function(data,
       partial_tp_1_done <- FALSE
       partial_tp_2_done <- FALSE
     }
-    # Entry logic
+    # ========================================
+    # ENTRY LOGIC
+    # ========================================
     else if (signal_raw_vec[i] != 0L && current_position == 0L) {
 
       signal_direction <- signal_raw_vec[i]
@@ -361,17 +352,18 @@ generate_signals <- function(data,
 
       atr_i <- atr_vec[i]
       if (!is.na(atr_i)) {
-        if (current_position == 1L) {
+        if (current_position == 1L) {  # LONG
           current_sl <- current_entry - (stop_loss_atr_mult * atr_i)
 
           if (tp_strategy == "full") {
             current_tp <- current_entry + (full_tp_atr_mult * atr_i)
           } else {
+            # Partial TP: Höchster TP Level
             current_tp <- current_entry + (max(partial_tp_1_atr, partial_tp_2_atr) * atr_i)
           }
 
           highest_price <- high_vec[i]
-        } else {
+        } else {  # SHORT
           current_sl <- current_entry + (stop_loss_atr_mult * atr_i)
 
           if (tp_strategy == "full") {
@@ -384,7 +376,9 @@ generate_signals <- function(data,
         }
       }
     }
-    # Pyramiding logic
+    # ========================================
+    # PYRAMIDING LOGIC
+    # ========================================
     else if (use_pyramiding &&
              current_position != 0L &&
              pyramid_count < max_pyramid_orders &&
@@ -395,16 +389,19 @@ generate_signals <- function(data,
 
       if (!is.na(atr_i)) {
 
+        # ========================================
+        # PYRAMIDING: BREAKOUT
+        # ========================================
         if (pyramid_method == "breakout") {
           if (i > breakout_lookback) {
-            if (current_position == 1L) {
+            if (current_position == 1L) {  # Long
               start_idx <- max(1, i - breakout_lookback)
               recent_high <- max(high_vec[start_idx:(i-1)], na.rm = TRUE)
 
               if (!is.infinite(recent_high) && high_vec[i] > recent_high) {
                 pyramid_signal <- TRUE
               }
-            } else {
+            } else {  # Short
               start_idx <- max(1, i - breakout_lookback)
               recent_low <- min(low_vec[start_idx:(i-1)], na.rm = TRUE)
 
@@ -415,15 +412,18 @@ generate_signals <- function(data,
           }
         }
 
+        # ========================================
+        # PYRAMIDING: CONSECUTIVE
+        # ========================================
         else if (pyramid_method == "consecutive") {
           if (i >= consecutive_bars) {
-            if (current_position == 1L) {
+            if (current_position == 1L) {  # Long
               start_idx <- max(1, i - consecutive_bars + 1)
               all_bullish <- all(close_change_vec[start_idx:i] > 0, na.rm = TRUE)
               if (all_bullish) {
                 pyramid_signal <- TRUE
               }
-            } else {
+            } else {  # Short
               start_idx <- max(1, i - consecutive_bars + 1)
               all_bearish <- all(close_change_vec[start_idx:i] < 0, na.rm = TRUE)
               if (all_bearish) {
@@ -433,7 +433,11 @@ generate_signals <- function(data,
           }
         }
 
+        # ========================================
+        # EXECUTE PYRAMIDING
+        # ========================================
         if (pyramid_signal) {
+          # Spacing Check
           last_entry <- pyramid_entries[length(pyramid_entries)]
           min_distance <- pyramid_spacing_atr * atr_i
 
@@ -444,11 +448,13 @@ generate_signals <- function(data,
             add_order <- close_vec[i] < last_entry - min_distance
           }
 
+          # Add Order
           if (add_order) {
             pyramid_count <- pyramid_count + 1L
             pyramid_entries <- c(pyramid_entries, close_vec[i])
             total_position_size <- total_position_size + pyramid_size_multiplier
 
+            # Adjust Stop Loss (nur bei Chandelier nicht nötig, da dynamisch)
             if (exit_strategy == "breakeven_trailing") {
               avg_entry <- mean(pyramid_entries)
               if (current_position == 1L) {
@@ -461,12 +467,15 @@ generate_signals <- function(data,
         }
       }
     }
-    # Exit logic
+    # ========================================
+    # EXIT LOGIC
+    # ========================================
     else if (current_position != 0L && !is.na(current_sl) && !is.na(current_tp)) {
 
       atr_i <- atr_vec[i]
       bars_in_trade <- i - entry_bar
 
+      # Max Bars Exit
       if (bars_in_trade >= max_bars_in_trade) {
         current_position <- 0L
         exit_reason_vec[i] <- "Max_Bars"
@@ -486,23 +495,30 @@ generate_signals <- function(data,
         next
       }
 
-      if (current_position == 1L) {
+      if (current_position == 1L) {  # ========== LONG POSITION ==========
 
+        # Update Highest Price
         if (high_vec[i] > highest_price) {
           highest_price <- high_vec[i]
         }
 
         current_profit <- highest_price - current_entry
 
+        # ========================================
+        # PARTIAL TAKE PROFIT LOGIC
+        # ========================================
         if (tp_strategy == "partial" && !is.na(atr_i)) {
 
+          # 1. Partial TP
           if (!partial_tp_1_done && current_profit >= partial_tp_1_atr * atr_i) {
             total_position_size <- total_position_size * (1 - partial_tp_1_size)
             partial_tp_1_done <- TRUE
 
+            # Move to Breakeven after 1st TP
             current_sl <- current_entry + (breakeven_offset_atr * atr_i)
             breakeven_moved <- TRUE
 
+            # Continue if position still open
             if (total_position_size <= 0.01) {
               current_position <- 0L
               exit_reason_vec[i] <- "Partial_TP_Full"
@@ -522,10 +538,12 @@ generate_signals <- function(data,
             }
           }
 
+          # 2. Partial TP
           if (!partial_tp_2_done && current_profit >= partial_tp_2_atr * atr_i) {
             total_position_size <- total_position_size * (1 - partial_tp_2_size)
             partial_tp_2_done <- TRUE
 
+            # Continue if position still open
             if (total_position_size <= 0.01) {
               current_position <- 0L
               exit_reason_vec[i] <- "Partial_TP_Full"
@@ -546,7 +564,12 @@ generate_signals <- function(data,
           }
         }
 
+        # ========================================
+        # STOP LOSS STRATEGY
+        # ========================================
+
         if (exit_strategy == "chandelier") {
+          # Chandelier Exit
           if (!is.na(chandelier_long_vec[i])) {
             current_sl <- max(current_sl, chandelier_long_vec[i])
             trailing_active <- TRUE
@@ -555,11 +578,13 @@ generate_signals <- function(data,
 
         else if (exit_strategy == "breakeven_trailing") {
           if (!is.na(atr_i)) {
+            # Phase 1: Breakeven
             if (!breakeven_moved && current_profit >= breakeven_trigger_atr * atr_i) {
               current_sl <- current_entry + (breakeven_offset_atr * atr_i)
               breakeven_moved <- TRUE
             }
 
+            # Phase 2: Trailing
             if (breakeven_moved) {
               profit_distance <- highest_price - current_entry
               activation_distance <- (breakeven_trigger_atr + trailing_start_atr_mult) * atr_i
@@ -573,6 +598,11 @@ generate_signals <- function(data,
           }
         }
 
+        # ========================================
+        # EXIT CHECK
+        # ========================================
+
+        # Stop Loss Hit
         if (low_vec[i] <= current_sl) {
           current_position <- 0L
 
@@ -597,6 +627,7 @@ generate_signals <- function(data,
           partial_tp_1_done <- FALSE
           partial_tp_2_done <- FALSE
         }
+        # Take Profit Hit
         else if (high_vec[i] >= current_tp) {
           current_position <- 0L
 
@@ -620,16 +651,21 @@ generate_signals <- function(data,
           partial_tp_2_done <- FALSE
         }
 
-      } else {
+      } else {  # ========== SHORT POSITION ==========
 
+        # Update Lowest Price
         if (low_vec[i] < lowest_price) {
           lowest_price <- low_vec[i]
         }
 
         current_profit <- current_entry - lowest_price
 
+        # ========================================
+        # PARTIAL TAKE PROFIT LOGIC
+        # ========================================
         if (tp_strategy == "partial" && !is.na(atr_i)) {
 
+          # 1. Partial TP
           if (!partial_tp_1_done && current_profit >= partial_tp_1_atr * atr_i) {
             total_position_size <- total_position_size * (1 - partial_tp_1_size)
             partial_tp_1_done <- TRUE
@@ -656,6 +692,7 @@ generate_signals <- function(data,
             }
           }
 
+          # 2. Partial TP
           if (!partial_tp_2_done && current_profit >= partial_tp_2_atr * atr_i) {
             total_position_size <- total_position_size * (1 - partial_tp_2_size)
             partial_tp_2_done <- TRUE
@@ -680,6 +717,10 @@ generate_signals <- function(data,
           }
         }
 
+        # ========================================
+        # STOP LOSS STRATEGY
+        # ========================================
+
         if (exit_strategy == "chandelier") {
           if (!is.na(chandelier_short_vec[i])) {
             current_sl <- min(current_sl, chandelier_short_vec[i])
@@ -689,11 +730,13 @@ generate_signals <- function(data,
 
         else if (exit_strategy == "breakeven_trailing") {
           if (!is.na(atr_i)) {
+            # Phase 1: Breakeven
             if (!breakeven_moved && current_profit >= breakeven_trigger_atr * atr_i) {
               current_sl <- current_entry - (breakeven_offset_atr * atr_i)
               breakeven_moved <- TRUE
             }
 
+            # Phase 2: Trailing
             if (breakeven_moved) {
               profit_distance <- current_entry - lowest_price
               activation_distance <- (breakeven_trigger_atr + trailing_start_atr_mult) * atr_i
@@ -707,6 +750,11 @@ generate_signals <- function(data,
           }
         }
 
+        # ========================================
+        # EXIT CHECK
+        # ========================================
+
+        # Stop Loss Hit
         if (high_vec[i] >= current_sl) {
           current_position <- 0L
 
@@ -731,6 +779,7 @@ generate_signals <- function(data,
           partial_tp_1_done <- FALSE
           partial_tp_2_done <- FALSE
         }
+        # Take Profit Hit
         else if (low_vec[i] <= current_tp) {
           current_position <- 0L
 
@@ -756,6 +805,7 @@ generate_signals <- function(data,
       }
     }
 
+    # Save state
     position[i] <- current_position
     entry_price[i] <- current_entry
     stop_loss[i] <- current_sl
@@ -764,6 +814,7 @@ generate_signals <- function(data,
     num_orders[i] <- pyramid_count
   }
 
+  # Write back to data.table
   dt[, `:=`(
     position = position,
     entry_price = entry_price,
@@ -779,12 +830,9 @@ generate_signals <- function(data,
 
   result <- as.data.frame(dt)
 
-  result <- result[, !names(result) %in% c("tenkan_cross_up", "tenkan_cross_down",
-                                           "price_above_cloud", "price_below_cloud",
-                                           "adx_filter_long", "adx_filter_short",
-                                           "adx_momentum", "adx_momentum_filter",
-                                           "rsi_filter_long", "rsi_filter_short",
-                                           "rsi_momentum", "rsi_momentum_long", "rsi_momentum_short",
+  # Clean up
+  result <- result[, !names(result) %in% c("dpo_lag", "hurst_trending",
+                                           "adx_ok", "price_rising", "price_falling",
                                            "chandelier_long", "chandelier_short")]
 
   return(result)
@@ -856,56 +904,50 @@ calculate_performance <- function(data) {
 }
 
 # ==============================================================================
-# BACKTEST WRAPPER
+# BACKTEST-WRAPPER
 # ==============================================================================
 
-run_backtest <- function(data) {
+run_backtest <- function(data, params) {
 
   data <- calculate_indicators(
     data,
-    conversion_period = CONVERSION_PERIOD,
-    base_period = BASE_PERIOD,
-    leading_span_b = LEADING_SPAN_B,
-    displacement = DISPLACEMENT,
-    atr_period = ATR_PERIOD,
-    adx_period = ADX_PERIOD,
-    chandelier_period = CHANDELIER_PERIOD
+    hurst_period = params$hurst_period,
+    dpo_period = params$dpo_period,
+    lookback_slope = params$lookback_slope,
+    atr_period = params$atr_period,
+    adx_period = params$adx_period,
+    chandelier_period = params$chandelier_period
   )
 
   data <- generate_signals(
     data,
-    adx_threshold_long = ADX_THRESHOLD_LONG,
-    adx_threshold_short = ADX_THRESHOLD_SHORT,
-    use_rsi_filter = USE_RSI_FILTER,
-    rsi_short = RSI_SHORT,
-    rsi_long = RSI_LONG,
-    use_rsi_momentum = USE_RSI_MOMENTUM,
-    rsi_momentum_threshold = RSI_MOMENTUM_THRESHOLD,
-    use_adx_momentum = USE_ADX_MOMENTUM,
-    adx_momentum_threshold = ADX_MOMENTUM_THRESHOLD,
-    stop_loss_atr_mult = STOP_LOSS_ATR_MULT,
-    use_pyramiding = USE_PYRAMIDING,
-    pyramid_method = PYRAMID_METHOD,
-    max_pyramid_orders = MAX_PYRAMID_ORDERS,
-    pyramid_spacing_atr = PYRAMID_SPACING_ATR,
-    pyramid_size_multiplier = PYRAMID_SIZE_MULTIPLIER,
-    consecutive_bars = CONSECUTIVE_BARS,
-    breakout_lookback = BREAKOUT_LOOKBACK,
-    exit_strategy = EXIT_STRATEGY,
-    chandelier_multiplier = CHANDELIER_MULTIPLIER,
-    chandelier_period = CHANDELIER_PERIOD,
-    breakeven_trigger_atr = BREAKEVEN_TRIGGER_ATR,
-    breakeven_offset_atr = BREAKEVEN_OFFSET_ATR,
-    trailing_stop_atr_mult = TRAILING_STOP_ATR_MULT,
-    trailing_start_atr_mult = TRAILING_START_ATR_MULT,
-    tp_strategy = TP_STRATEGY,
-    full_tp_atr_mult = FULL_TP_ATR_MULT,
-    partial_tp_1_atr = PARTIAL_TP_1_ATR,
-    partial_tp_1_size = PARTIAL_TP_1_SIZE,
-    partial_tp_2_atr = PARTIAL_TP_2_ATR,
-    partial_tp_2_size = PARTIAL_TP_2_SIZE,
-    close_time_hour = CLOSE_TIME_HOUR,
-    max_bars_in_trade = MAX_BARS_IN_TRADE
+    hurst_threshold = params$hurst_threshold,
+    use_price_confirmation = params$use_price_confirmation,
+    use_adx_filter = params$use_adx_filter,
+    adx_threshold = params$adx_threshold,
+    stop_loss_atr_mult = params$stop_loss_atr_mult,
+    use_pyramiding = params$use_pyramiding,
+    pyramid_method = params$pyramid_method,
+    max_pyramid_orders = params$max_pyramid_orders,
+    pyramid_spacing_atr = params$pyramid_spacing_atr,
+    pyramid_size_multiplier = params$pyramid_size_multiplier,
+    consecutive_bars = params$consecutive_bars,
+    breakout_lookback = params$breakout_lookback,
+    exit_strategy = params$exit_strategy,
+    chandelier_multiplier = params$chandelier_multiplier,
+    chandelier_period = params$chandelier_period,
+    breakeven_trigger_atr = params$breakeven_trigger_atr,
+    breakeven_offset_atr = params$breakeven_offset_atr,
+    trailing_stop_atr_mult = params$trailing_stop_atr_mult,
+    trailing_start_atr_mult = params$trailing_start_atr_mult,
+    tp_strategy = params$tp_strategy,
+    full_tp_atr_mult = params$full_tp_atr_mult,
+    partial_tp_1_atr = params$partial_tp_1_atr,
+    partial_tp_1_size = params$partial_tp_1_size,
+    partial_tp_2_atr = params$partial_tp_2_atr,
+    partial_tp_2_size = params$partial_tp_2_size,
+    close_time_hour = params$close_time_hour,
+    max_bars_in_trade = params$max_bars_in_trade
   )
 
   perf <- calculate_performance(data)
@@ -914,379 +956,258 @@ run_backtest <- function(data) {
 }
 
 # ==============================================================================
-# TRAINING PERFORMANCE
+# PARAMETER-OPTIMIERUNG
 # ==============================================================================
 
-cat("Berechne Training Performance\n")
-cat("----------------------------------------\n")
+optimize_parameters <- function(data,
+                                param_grid,
+                                metric = "sharpe_ratio",
+                                min_trades = 10,
+                                parallel = TRUE) {
 
-train_perf <- run_backtest(train_data)
+  cat(sprintf("Starte Parameter-Optimierung mit %d Kombinationen...\n", nrow(param_grid)))
 
-cat("✓ Indikatoren berechnet\n")
-cat("✓ Handelssignale mit Pyramiding generiert\n\n")
+  if (parallel) {
+    library(parallel)
+    library(doParallel)
+    library(foreach)
 
-cat("Echte Training Performance:\n")
-cat(sprintf("  Total Return: %.4f\n", train_perf$total_return))
-cat(sprintf("  Sharpe Ratio: %.4f\n", train_perf$sharpe_ratio))
-cat(sprintf("  Profit Factor: %.4f\n", train_perf$profit_factor))
-cat(sprintf("  Anzahl Trades: %d\n", train_perf$n_trades))
-cat(sprintf("  Win Rate: %.4f\n", train_perf$win_rate))
-cat(sprintf("  Max Drawdown: %.4f%%\n\n", train_perf$max_drawdown_pct))
+    n_cores <- detectCores() - 1
+    cat(sprintf("Nutze %d CPU-Kerne\n", n_cores))
 
-if (METRIC == "profit_factor") {
-  real_metric_train <- train_perf$profit_factor
-} else if (METRIC == "sharpe_ratio") {
-  real_metric_train <- train_perf$sharpe_ratio
-} else if (METRIC == "total_return") {
-  real_metric_train <- train_perf$total_return
-}
+    cl <- makeCluster(n_cores)
 
-# ==============================================================================
-# MONTE CARLO PERMUTATION TEST - TRAINING
-# ==============================================================================
+    clusterExport(cl,
+                  varlist = c("calculate_indicators",
+                              "generate_signals",
+                              "calculate_performance",
+                              "run_backtest",
+                              "data",
+                              "calculate_hurst",
+                              "calculate_dpo"),
+                  envir = environment())
 
-cat("MONTE CARLO PERMUTATION TEST (TRAINING)\n")
-cat("========================================\n")
-cat(sprintf("Führe %d Permutationen durch...\n\n", N_PERMUTATIONS))
+    clusterEvalQ(cl, {
+      library(tidyverse)
+      library(TTR)
+      library(lubridate)
+      library(data.table)
+    })
 
-train_data$log_return <- log(train_data$close / lag(train_data$close))
+    registerDoParallel(cl)
 
-permuted_metrics_train <- numeric(N_PERMUTATIONS)
-perm_better_count_train <- 1
+    results_list <- foreach(
+      i = 1:nrow(param_grid),
+      .packages = c("tidyverse", "TTR", "lubridate", "data.table"),
+      .errorhandling = "pass",
+      .verbose = FALSE
+    ) %dopar% {
 
-pb <- txtProgressBar(min = 0, max = N_PERMUTATIONS, style = 3)
+      params <- as.list(param_grid[i, ])
 
-for (perm_i in 1:N_PERMUTATIONS) {
+      tryCatch({
+        perf <- run_backtest(data, params)
 
-  block_length <- max(5, round(nrow(train_data) / 20))
-  n_blocks <- ceiling(nrow(train_data) / block_length)
-  block_indices <- sample(1:n_blocks, n_blocks, replace = FALSE)
+        if (perf$n_trades >= min_trades &&
+            is.finite(perf[[metric]]) &&
+            !is.na(perf[[metric]])) {
 
-  permuted_returns <- c()
-  for (block_idx in block_indices) {
-    start_idx <- (block_idx - 1) * block_length + 1
-    end_idx <- min(block_idx * block_length, nrow(train_data))
-    if (start_idx <= nrow(train_data)) {
-      permuted_returns <- c(permuted_returns,
-                            train_data$log_return[start_idx:end_idx])
+          result_df <- data.frame(
+            iteration = i,
+            sharpe_ratio = perf$sharpe_ratio,
+            total_return = perf$total_return,
+            n_trades = perf$n_trades,
+            win_rate = perf$win_rate,
+            profit_factor = perf$profit_factor,
+            max_drawdown = perf$max_drawdown,
+            stringsAsFactors = FALSE
+          )
+
+          # Add all params
+          for (param_name in names(params)) {
+            result_df[[param_name]] <- params[[param_name]]
+          }
+
+          result_df
+        } else {
+          NULL
+        }
+      }, error = function(e) {
+        list(error = TRUE, message = e$message, iteration = i)
+      })
     }
-  }
 
-  permuted_returns <- permuted_returns[1:nrow(train_data)]
-  permuted_returns[is.na(permuted_returns)] <- mean(permuted_returns, na.rm = TRUE)
+    stopCluster(cl)
 
-  train_perm <- train_data
-  train_perm$log_return <- permuted_returns
-  train_perm$close <- train_data$close[1] * exp(cumsum(train_perm$log_return))
-  train_perm$open <- train_perm$close * exp(rnorm(nrow(train_data), 0, 0.001))
-  train_perm$high <- train_perm$close * (1 + abs(rnorm(nrow(train_data), 0, 0.005)))
-  train_perm$low <- train_perm$close * (1 - abs(rnorm(nrow(train_data), 0, 0.005)))
+    errors <- sapply(results_list, function(x) {
+      if (is.list(x) && !is.data.frame(x) && !is.null(x$error)) {
+        return(TRUE)
+      }
+      return(FALSE)
+    })
 
-  perm_perf <- run_backtest(train_perm)
-
-  if (METRIC == "profit_factor") {
-    perm_metric <- perm_perf$profit_factor
-  } else if (METRIC == "sharpe_ratio") {
-    perm_metric <- perm_perf$sharpe_ratio
-  } else if (METRIC == "total_return") {
-    perm_metric <- perm_perf$total_return
-  }
-
-  permuted_metrics_train[perm_i] <- perm_metric
-
-  if (perm_metric >= real_metric_train) {
-    perm_better_count_train <- perm_better_count_train + 1
-  }
-
-  setTxtProgressBar(pb, perm_i)
-}
-
-close(pb)
-
-p_value_train <- perm_better_count_train / (N_PERMUTATIONS + 1)
-
-cat("\n\n")
-cat("========================================\n")
-cat("MCPT ERGEBNISSE - TRAINING\n")
-cat("========================================\n")
-cat(sprintf("Metrik: %s\n", METRIC))
-cat(sprintf("Echte Performance: %.4f\n", real_metric_train))
-cat(sprintf("MCPT p-Wert: %.4f\n", p_value_train))
-if (p_value_train < 0.05) {
-  cat("✓ SIGNIFIKANT (p < 0.05)\n")
-} else {
-  cat("✗ NICHT SIGNIFIKANT (p ≥ 0.05)\n")
-}
-cat("========================================\n\n")
-
-# ==============================================================================
-# TEST-DATEN PERFORMANCE
-# ==============================================================================
-
-if (nrow(test_data) > 0) {
-
-  cat("Berechne Test Performance\n")
-  cat("----------------------------------------\n")
-
-  test_perf <- run_backtest(test_data)
-
-  cat("Out-of-Sample Performance:\n")
-  cat(sprintf("  Total Return: %.4f\n", test_perf$total_return))
-  cat(sprintf("  Sharpe Ratio: %.4f\n", test_perf$sharpe_ratio))
-  cat(sprintf("  Profit Factor: %.4f\n", test_perf$profit_factor))
-  cat(sprintf("  Anzahl Trades: %d\n", test_perf$n_trades))
-  cat(sprintf("  Win Rate: %.4f\n", test_perf$win_rate))
-  cat(sprintf("  Max Drawdown: %.4f%%\n\n", test_perf$max_drawdown_pct))
-
-  if (METRIC == "profit_factor") {
-    real_metric_test <- test_perf$profit_factor
-  } else if (METRIC == "sharpe_ratio") {
-    real_metric_test <- test_perf$sharpe_ratio
-  } else if (METRIC == "total_return") {
-    real_metric_test <- test_perf$total_return
-  }
-
-  # ==============================================================================
-  # MONTE CARLO PERMUTATION TEST - TEST
-  # ==============================================================================
-
-  cat("MONTE CARLO PERMUTATION TEST (TEST)\n")
-  cat("========================================\n")
-  cat(sprintf("Führe %d Permutationen für Test-Daten durch...\n\n", N_PERMUTATIONS))
-
-  test_data$log_return <- log(test_data$close / lag(test_data$close))
-
-  permuted_metrics_test <- numeric(N_PERMUTATIONS)
-  perm_better_count_test <- 1
-
-  pb <- txtProgressBar(min = 0, max = N_PERMUTATIONS, style = 3)
-
-  for (perm_i in 1:N_PERMUTATIONS) {
-
-    block_length <- max(5, round(nrow(test_data) / 20))
-    n_blocks <- ceiling(nrow(test_data) / block_length)
-    block_indices <- sample(1:n_blocks, n_blocks, replace = FALSE)
-
-    permuted_returns <- c()
-    for (block_idx in block_indices) {
-      start_idx <- (block_idx - 1) * block_length + 1
-      end_idx <- min(block_idx * block_length, nrow(test_data))
-      if (start_idx <= nrow(test_data)) {
-        permuted_returns <- c(permuted_returns,
-                              test_data$log_return[start_idx:end_idx])
+    if (any(errors)) {
+      error_messages <- results_list[errors]
+      cat("\n⚠ Einige Iterationen hatten Fehler:\n")
+      for (err in head(error_messages, 3)) {
+        cat(sprintf("  Iteration %d: %s\n", err$iteration, err$message))
       }
     }
 
-    permuted_returns <- permuted_returns[1:nrow(test_data)]
-    permuted_returns[is.na(permuted_returns)] <- mean(permuted_returns, na.rm = TRUE)
+    results_list <- results_list[sapply(results_list, is.data.frame)]
 
-    test_perm <- test_data
-    test_perm$log_return <- permuted_returns
-    test_perm$close <- test_data$close[1] * exp(cumsum(test_perm$log_return))
-    test_perm$open <- test_perm$close * exp(rnorm(nrow(test_data), 0, 0.001))
-    test_perm$high <- test_perm$close * (1 + abs(rnorm(nrow(test_data), 0, 0.005)))
-    test_perm$low <- test_perm$close * (1 - abs(rnorm(nrow(test_data), 0, 0.005)))
-
-    perm_perf <- run_backtest(test_perm)
-
-    if (METRIC == "profit_factor") {
-      perm_metric <- perm_perf$profit_factor
-    } else if (METRIC == "sharpe_ratio") {
-      perm_metric <- perm_perf$sharpe_ratio
-    } else if (METRIC == "total_return") {
-      perm_metric <- perm_perf$total_return
+    if (length(results_list) > 0) {
+      results <- bind_rows(results_list)
+    } else {
+      results <- NULL
     }
 
-    permuted_metrics_test[perm_i] <- perm_metric
-
-    if (perm_metric >= real_metric_test) {
-      perm_better_count_test <- perm_better_count_test + 1
-    }
-
-    setTxtProgressBar(pb, perm_i)
-  }
-
-  close(pb)
-
-  p_value_test <- perm_better_count_test / (N_PERMUTATIONS + 1)
-
-  cat("\n\n")
-  cat("========================================\n")
-  cat("MCPT ERGEBNISSE - TEST\n")
-  cat("========================================\n")
-  cat(sprintf("Metrik: %s\n", METRIC))
-  cat(sprintf("Echte Performance: %.4f\n", real_metric_test))
-  cat(sprintf("MCPT p-Wert: %.4f\n", p_value_test))
-  if (p_value_test < 0.05) {
-    cat("✓ SIGNIFIKANT (p < 0.05)\n")
   } else {
-    cat("✗ NICHT SIGNIFIKANT (p ≥ 0.05)\n")
+    # Sequential processing
+    results_list <- list()
+    pb <- txtProgressBar(min = 0, max = nrow(param_grid), style = 3)
+
+    for (i in 1:nrow(param_grid)) {
+      params <- as.list(param_grid[i, ])
+
+      tryCatch({
+        perf <- run_backtest(data, params)
+
+        if (perf$n_trades >= min_trades &&
+            is.finite(perf[[metric]]) &&
+            !is.na(perf[[metric]])) {
+
+          result_df <- data.frame(
+            iteration = i,
+            sharpe_ratio = perf$sharpe_ratio,
+            total_return = perf$total_return,
+            n_trades = perf$n_trades,
+            win_rate = perf$win_rate,
+            profit_factor = perf$profit_factor,
+            max_drawdown = perf$max_drawdown,
+            stringsAsFactors = FALSE
+          )
+
+          for (param_name in names(params)) {
+            result_df[[param_name]] <- params[[param_name]]
+          }
+
+          results_list[[length(results_list) + 1]] <- result_df
+        }
+      }, error = function(e) {
+        cat(sprintf("\nFehler bei Iteration %d: %s\n", i, e$message))
+      })
+
+      setTxtProgressBar(pb, i)
+    }
+
+    close(pb)
+
+    if (length(results_list) > 0) {
+      results <- bind_rows(results_list)
+    } else {
+      results <- NULL
+    }
   }
-  cat("========================================\n\n")
+
+  if (is.null(results) || nrow(results) == 0) {
+    stop("Keine validen Ergebnisse gefunden!")
+  }
+
+  cat(sprintf("\n✓ %d von %d Kombinationen waren valide\n",
+              nrow(results), nrow(param_grid)))
+
+  results <- results %>%
+    arrange(desc(.data[[metric]])) %>%
+    mutate(rank = row_number())
+
+  return(results)
 }
 
 # ==============================================================================
-# VISUALISIERUNGEN
+# PARAMETER-GRID
 # ==============================================================================
 
-cat("Erstelle Visualisierungen\n")
-cat("----------------------------------------\n")
+param_grid <- expand.grid(
+  # Entry Signal Parameter
+  hurst_period = c(80, 100),
+  hurst_threshold = c(0.5, 0.55, 0.6),
+  dpo_period = c(15, 20, 25),
+  lookback_slope = c(2, 3),
+  atr_period = 14,
+  adx_period = 14,
+  use_price_confirmation = TRUE,
+  use_adx_filter = FALSE,
+  adx_threshold = 20,
 
-# MCPT Histogram - Training
-df_plot_train <- data.frame(metric = permuted_metrics_train)
+  # Stop Loss
+  stop_loss_atr_mult = c(2.5, 3.0),
 
-p1 <- ggplot(df_plot_train, aes(x = metric)) +
-  geom_histogram(aes(y = after_stat(density)), bins = 50,
-                 fill = "gray70", color = "black", alpha = 0.7) +
-  geom_density(color = "blue", linewidth = 1.2) +
-  geom_vline(xintercept = real_metric_train,
-             color = "red", linewidth = 1.5, linetype = "dashed") +
-  annotate("text",
-           x = real_metric_train,
-           y = Inf,
-           label = sprintf("Echte Performance\n%.4f", real_metric_train),
-           hjust = -0.1, vjust = 2, color = "red", size = 4) +
-  labs(
-    title = "MCPT: TRAINING-DATEN (Ichimoku mit Pyramiding)",
-    subtitle = sprintf("p-Wert = %.4f | Metrik: %s | N = %d",
-                       p_value_train, METRIC, N_PERMUTATIONS),
-    x = METRIC,
-    y = "Dichte"
-  ) +
-  theme_minimal()
+  # Pyramiding
+  use_pyramiding = c(TRUE, FALSE),
+  pyramid_method = c("breakout", "consecutive"),
+  max_pyramid_orders = c(2, 3),
+  pyramid_spacing_atr = c(0.5, 1.0),
+  pyramid_size_multiplier = c(0.5),
+  consecutive_bars = c(2, 3),
+  breakout_lookback = c(15, 20),
 
-print(p1)
+  # Exit Strategy
+  exit_strategy = c("chandelier", "breakeven_trailing"),
+  chandelier_multiplier = c(2.5, 3.0),
+  chandelier_period = c(22),
+  breakeven_trigger_atr = c(1.2, 1.5),
+  breakeven_offset_atr = c(0.2),
+  trailing_stop_atr_mult = c(1.8, 2.0),
+  trailing_start_atr_mult = c(1.5),
 
-# MCPT Histogram - Test
-if (nrow(test_data) > 0) {
-  df_plot_test <- data.frame(metric = permuted_metrics_test)
+  # Take Profit
+  tp_strategy = c("full", "partial"),
+  full_tp_atr_mult = c(4.0, 4.5),
+  partial_tp_1_atr = c(2.0, 2.5),
+  partial_tp_1_size = c(0.33),
+  partial_tp_2_atr = c(3.5, 4.0),
+  partial_tp_2_size = c(0.33),
 
-  p2 <- ggplot(df_plot_test, aes(x = metric)) +
-    geom_histogram(aes(y = after_stat(density)), bins = 50,
-                   fill = "gray70", color = "black", alpha = 0.7) +
-    geom_density(color = "blue", linewidth = 1.2) +
-    geom_vline(xintercept = real_metric_test,
-               color = "red", linewidth = 1.5, linetype = "dashed") +
-    annotate("text",
-             x = real_metric_test,
-             y = Inf,
-             label = sprintf("Echte Performance\n%.4f", real_metric_test),
-             hjust = -0.1, vjust = 2, color = "red", size = 4) +
-    labs(
-      title = "MCPT: TEST-DATEN (Ichimoku mit Pyramiding)",
-      subtitle = sprintf("p-Wert = %.4f | Metrik: %s | N = %d",
-                         p_value_test, METRIC, N_PERMUTATIONS),
-      x = METRIC,
-      y = "Dichte"
-    ) +
-    theme_minimal()
+  # Time
+  close_time_hour = 22,
+  max_bars_in_trade = c(80, 100)
+)
 
-  print(p2)
-}
+# Filter
+param_grid <- param_grid %>%
+  filter(partial_tp_1_atr < partial_tp_2_atr)
 
-# Equity Curves
-train_perf$data$cumulative_return <- cumsum(replace_na(train_perf$data$strategy_return, 0))
-train_perf$data$equity_curve <- exp(train_perf$data$cumulative_return)
-
-p3 <- ggplot(train_perf$data, aes(x = date, y = equity_curve)) +
-  geom_line(color = "darkgreen", linewidth = 1) +
-  geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
-  labs(
-    title = "In-Sample Equity Curve (Ichimoku mit Pyramiding)",
-    subtitle = sprintf("Sharpe: %.2f | Return: %.2f%% | Trades: %d | p = %.4f",
-                       train_perf$sharpe_ratio,
-                       train_perf$total_return * 100,
-                       train_perf$n_trades,
-                       p_value_train),
-    x = "Datum",
-    y = "Kumulative Returns"
-  ) +
-  scale_y_log10() +
-  theme_minimal()
-
-print(p3)
-
-if (nrow(test_data) > 0) {
-  test_perf$data$cumulative_return <- cumsum(replace_na(test_perf$data$strategy_return, 0))
-  test_perf$data$equity_curve <- exp(test_perf$data$cumulative_return)
-
-  p4 <- ggplot(test_perf$data, aes(x = date, y = equity_curve)) +
-    geom_line(color = "darkblue", linewidth = 1) +
-    geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
-    labs(
-      title = "Out-of-Sample Equity Curve (Ichimoku mit Pyramiding)",
-      subtitle = sprintf("Sharpe: %.2f | Return: %.2f%% | Trades: %d | p = %.4f",
-                         test_perf$sharpe_ratio,
-                         test_perf$total_return * 100,
-                         test_perf$n_trades,
-                         p_value_test),
-      x = "Datum",
-      y = "Kumulative Returns"
-    ) +
-    scale_y_log10() +
-    theme_minimal()
-
-  print(p4)
-}
-
-cat("✓ Visualisierungen erstellt\n\n")
+cat(sprintf("Parameter-Grid enthält %d Kombinationen\n", nrow(param_grid)))
 
 # ==============================================================================
-# FINALE ZUSAMMENFASSUNG
+# TEST
 # ==============================================================================
 
-cat("\n")
-cat("========================================\n")
-cat("FINALE ZUSAMMENFASSUNG\n")
-cat("========================================\n\n")
+cat("\n=== SPEED TEST ===\n")
+params_test <- param_grid[1,]
 
-cat("Strategie-Parameter:\n")
-cat(sprintf("  Ichimoku: Conv=%d, Base=%d, SpanB=%d, Disp=%d\n",
-            CONVERSION_PERIOD, BASE_PERIOD, LEADING_SPAN_B, DISPLACEMENT))
-cat(sprintf("  ADX: Long>=%d, Short>=%d | RSI: Long>%d, Short<%d\n",
-            ADX_THRESHOLD_LONG, ADX_THRESHOLD_SHORT, RSI_LONG, RSI_SHORT))
-cat(sprintf("  Pyramiding: %s | Method: %s | Max Orders: %d\n",
-            USE_PYRAMIDING, PYRAMID_METHOD, MAX_PYRAMID_ORDERS))
-cat(sprintf("  Exit Strategy: %s | TP Strategy: %s\n",
-            EXIT_STRATEGY, TP_STRATEGY))
-cat(sprintf("  Stop Loss: %.1fx ATR | Take Profit: %.1fx ATR\n\n",
-            STOP_LOSS_ATR_MULT, FULL_TP_ATR_MULT))
+tic("Full Backtest")
+backtest_loop <- run_backtest(test_data, params_test)
+toc()
 
-cat("TRAINING:\n")
-cat(sprintf("  Sharpe Ratio: %.4f\n", train_perf$sharpe_ratio))
-cat(sprintf("  Total Return: %.2f%%\n", train_perf$total_return * 100))
-cat(sprintf("  Profit Factor: %.4f\n", train_perf$profit_factor))
-cat(sprintf("  Win Rate: %.2f%%\n", train_perf$win_rate * 100))
-cat(sprintf("  Trades: %d\n", train_perf$n_trades))
-cat(sprintf("  MCPT p-Wert: %.4f %s\n\n",
-            p_value_train,
-            ifelse(p_value_train < 0.05, "✓", "✗")))
+cat("\nTest-Backtest abgeschlossen:\n")
+cat(sprintf("Sharpe Ratio: %.2f\n", backtest_loop$sharpe_ratio))
+cat(sprintf("Total Return: %.2f%%\n", backtest_loop$total_return * 100))
+cat(sprintf("Trades: %d\n", backtest_loop$n_trades))
 
-if (nrow(test_data) > 0) {
-  cat("TEST:\n")
-  cat(sprintf("  Sharpe Ratio: %.4f\n", test_perf$sharpe_ratio))
-  cat(sprintf("  Total Return: %.2f%%\n", test_perf$total_return * 100))
-  cat(sprintf("  Profit Factor: %.4f\n", test_perf$profit_factor))
-  cat(sprintf("  Win Rate: %.2f%%\n", test_perf$win_rate * 100))
-  cat(sprintf("  Trades: %d\n", test_perf$n_trades))
-  cat(sprintf("  Drawdown: %.2f%%\n", test_perf$max_drawdown_pct))
-  cat(sprintf("  MCPT p-Wert: %.4f %s\n\n",
-              p_value_test,
-              ifelse(p_value_test < 0.05, "✓", "✗")))
-}
+# ==============================================================================
+# OPTIMIERUNG
+# ==============================================================================
 
-cat("INTERPRETATION:\n")
-if (p_value_train < 0.05 && (nrow(test_data) == 0 || p_value_test < 0.05)) {
-  cat("✓ Strategie ist statistisch robust\n")
-  cat("  Beide MCPT-Tests sind signifikant\n")
-} else if (p_value_train < 0.05 && p_value_test >= 0.05) {
-  cat("⚠ In-Sample gut, aber Out-of-Sample fraglich\n")
-  cat("  Mögliches Overfitting vorhanden\n")
-} else {
-  cat("✗ Strategie ist statistisch nicht robust\n")
-  cat("  Hohes Risiko für False Positives\n")
-}
+tic()
+optimization_results <- optimize_parameters(
+  data = train_data,
+  param_grid = param_grid,
+  metric = "sharpe_ratio",
+  min_trades = 20,
+  parallel = TRUE
+)
+toc()
 
-cat("\n========================================\n")
-cat("✓ ANALYSE ABGESCHLOSSEN\n")
-cat("========================================\n\n")
+cat("\n✅ Optimierung abgeschlossen!\n")

@@ -1,5 +1,5 @@
 # ==============================================================================
-# MONTE CARLO PERMUTATION TEST (MCPT) - Ichimoku STRATEGIE
+# MONTE CARLO PERMUTATION TEST (MCPT) - HURST-DPO STRATEGIE
 # Mit vollständigem Pyramiding & Advanced Exit Strategies
 # ==============================================================================
 
@@ -23,7 +23,7 @@ library(data.table)
 cat("\n")
 cat("########################################################################\n")
 cat("#                                                                      #\n")
-cat("#      MCPT für Ichimoku Strategie mit Pyramiding                    #\n")
+cat("#      MCPT für Hurst-DPO Strategie mit Pyramiding                   #\n")
 cat("#      Mit Advanced Exit Strategies & Risk Management                 #\n")
 cat("#                                                                      #\n")
 cat("########################################################################\n\n")
@@ -36,28 +36,17 @@ cat("########################################################################\n\
 N_PERMUTATIONS <- 300
 METRIC <- "profit_factor"  # "sharpe_ratio", "total_return", "profit_factor"
 
-# Ichimoku Parameter (Best from Training)
-CONVERSION_PERIOD <- 20
-BASE_PERIOD <- 23
-LEADING_SPAN_B <- 44
-DISPLACEMENT <- 33
+# Hurst-DPO Parameter (Best from Training)
+HURST_PERIOD <- 100
+HURST_THRESHOLD <- 0.55
+DPO_PERIOD <- 20
+LOOKBACK_SLOPE <- 3
 
 # Risk Management Parameter
 ATR_PERIOD <- 14
 ADX_PERIOD <- 14
 CHANDELIER_PERIOD <- 22
 STOP_LOSS_ATR_MULT <- 3.0
-
-# ADX/RSI Filter
-ADX_THRESHOLD_LONG <- 19
-ADX_THRESHOLD_SHORT <- 22
-USE_RSI_FILTER <- TRUE
-RSI_LONG <- 55
-RSI_SHORT <- 45
-USE_RSI_MOMENTUM <- TRUE
-RSI_MOMENTUM_THRESHOLD <- -2
-USE_ADX_MOMENTUM <- TRUE
-ADX_MOMENTUM_THRESHOLD <- -1
 
 # Pyramiding Parameter
 USE_PYRAMIDING <- TRUE
@@ -87,6 +76,11 @@ PARTIAL_TP_2_SIZE <- 0.33
 # Time Settings
 CLOSE_TIME_HOUR <- 22
 MAX_BARS_IN_TRADE <- 100
+
+# Optional Filters
+USE_PRICE_CONFIRMATION <- TRUE
+USE_ADX_FILTER <- FALSE
+ADX_THRESHOLD <- 20
 
 # Train/Test Jahre
 TRAIN_START_YEAR <- 2023
@@ -144,44 +138,73 @@ cat(sprintf("Test: %d Bars (%s bis %s)\n\n",
             max(test_data$date)))
 
 # ==============================================================================
-# INDIKATOREN BERECHNEN (ICHIMOKU)
+# INDIKATOREN-FUNKTIONEN
+# ==============================================================================
+
+calculate_hurst <- function(price, n = 100) {
+  if(length(price) < n) return(rep(NA, length(price)))
+
+  hurst <- rep(NA, length(price))
+  for(i in n:length(price)) {
+    ts <- price[(i-n+1):i]
+
+    # R/S Analysis
+    lags <- c(10, 20, 30, 40, 50)
+    rs <- numeric(length(lags))
+
+    for(j in seq_along(lags)) {
+      lag <- lags[j]
+      if(lag >= length(ts)) next
+
+      # Calculate R/S for this lag
+      chunks <- split(ts, ceiling(seq_along(ts) / lag))
+      rs_values <- sapply(chunks, function(chunk) {
+        if(length(chunk) < 2) return(NA)
+        mean_chunk <- mean(chunk)
+        cumdev <- cumsum(chunk - mean_chunk)
+        R <- max(cumdev) - min(cumdev)
+        S <- sd(chunk)
+        if(S == 0 || is.na(S)) return(NA)
+        return(R / S)
+      })
+      rs[j] <- mean(rs_values, na.rm = TRUE)
+    }
+
+    # Linear regression to find Hurst
+    valid <- !is.na(rs) & rs > 0
+    if(sum(valid) >= 3) {
+      fit <- lm(log(rs[valid]) ~ log(lags[valid]))
+      hurst[i] <- coef(fit)[2]
+    }
+  }
+  return(hurst)
+}
+
+calculate_dpo <- function(close, n = 20) {
+  displaced_ma <- SMA(close, n)
+  shift <- floor(n/2) + 1
+  dpo <- close - lag(displaced_ma, shift)
+  return(as.numeric(dpo))
+}
+
+# ==============================================================================
+# INDIKATOREN BERECHNEN
 # ==============================================================================
 
 calculate_indicators <- function(data,
-                                 conversion_period = 20,
-                                 base_period = 23,
-                                 leading_span_b = 44,
-                                 displacement = 33,
+                                 hurst_period = 100,
+                                 dpo_period = 20,
+                                 lookback_slope = 3,
                                  atr_period = 14,
                                  adx_period = 14,
                                  chandelier_period = 22) {
 
-  # Ichimoku-Komponenten
-  data$tenkan_sen <- (runMax(data$high, conversion_period) +
-                        runMin(data$low, conversion_period)) / 2
-
-  data$kijun_sen <- (runMax(data$high, base_period) +
-                       runMin(data$low, base_period)) / 2
-
-  data$senkou_span_a <- lag((data$tenkan_sen + data$kijun_sen) / 2,
-                            displacement)
-
-  data$senkou_span_b <- lag((runMax(data$high, leading_span_b) +
-                               runMin(data$low, leading_span_b)) / 2,
-                            displacement)
-
-  data$chikou_span <- lead(data$close, displacement)
-
-  # ATR
+  data$hurst <- calculate_hurst(data$close, n = hurst_period)
+  data$dpo <- calculate_dpo(data$close, n = dpo_period)
+  data$price_slope <- (data$close - lag(data$close, lookback_slope)) / lookback_slope
   data$atr <- ATR(cbind(data$high, data$low, data$close), n = atr_period)[, "atr"]
-
-  # ADX
   data$adx <- ADX(cbind(data$high, data$low, data$close), n = adx_period)[, "ADX"]
 
-  # RSI
-  data$rsi <- RSI(data$close, n = 14)
-
-  # Zusätzliche Indikatoren für Pyramiding/Exits
   data$close_change <- c(NA, diff(data$close))
   data$highest_high <- runMax(data$high, chandelier_period)
   data$lowest_low <- runMin(data$low, chandelier_period)
@@ -194,15 +217,10 @@ calculate_indicators <- function(data,
 # ==============================================================================
 
 generate_signals <- function(data,
-                             adx_threshold_long = 19,
-                             adx_threshold_short = 22,
-                             use_rsi_filter = TRUE,
-                             rsi_short = 70,
-                             rsi_long = 51,
-                             use_rsi_momentum = TRUE,
-                             rsi_momentum_threshold = -2,
-                             use_adx_momentum = TRUE,
-                             adx_momentum_threshold = -1,
+                             hurst_threshold = 0.55,
+                             use_price_confirmation = TRUE,
+                             use_adx_filter = FALSE,
+                             adx_threshold = 20,
                              stop_loss_atr_mult = 3.0,
                              use_pyramiding = TRUE,
                              pyramid_method = "breakout",
@@ -230,56 +248,35 @@ generate_signals <- function(data,
   dt <- as.data.table(data)
   n <- nrow(dt)
 
-  # Vektorisierte Signal-Generierung (ICHIMOKU)
-  dt[, tenkan_cross_up := tenkan_sen > kijun_sen & shift(tenkan_sen, 1) <= shift(kijun_sen, 1)]
-  dt[, tenkan_cross_down := tenkan_sen < kijun_sen & shift(tenkan_sen, 1) >= shift(kijun_sen, 1)]
+  # Vektorisierte Signal-Generierung
+  dt[, dpo_lag := shift(dpo, 1)]
+  dt[, hurst_trending := hurst > hurst_threshold]
 
-  dt[, price_above_cloud := close > pmax(senkou_span_a, senkou_span_b, na.rm = TRUE)]
-  dt[, price_below_cloud := close < pmin(senkou_span_a, senkou_span_b, na.rm = TRUE)]
-
-  dt[, adx_filter_long := adx >= adx_threshold_long]
-  dt[, adx_filter_short := adx >= adx_threshold_short]
-
-  if (use_adx_momentum) {
-    dt[, adx_momentum := adx - shift(adx, 1)]
-    dt[, adx_momentum_filter := adx_momentum > adx_momentum_threshold]
+  if (use_adx_filter) {
+    dt[, adx_ok := adx >= adx_threshold]
   } else {
-    dt[, adx_momentum_filter := TRUE]
+    dt[, adx_ok := TRUE]
   }
 
-  if (use_rsi_filter) {
-    dt[, rsi_filter_long := rsi > rsi_long]
-    dt[, rsi_filter_short := rsi < rsi_short]
+  if (use_price_confirmation) {
+    dt[, price_rising := price_slope > 0]
+    dt[, price_falling := price_slope < 0]
   } else {
-    dt[, rsi_filter_long := TRUE]
-    dt[, rsi_filter_short := TRUE]
+    dt[, price_rising := TRUE]
+    dt[, price_falling := TRUE]
   }
 
-  if (use_rsi_momentum) {
-    dt[, rsi_momentum := rsi - shift(rsi, 1)]
-    dt[, rsi_momentum_long := rsi_momentum > rsi_momentum_threshold]
-    dt[, rsi_momentum_short := rsi_momentum < -rsi_momentum_threshold]
-  } else {
-    dt[, rsi_momentum_long := TRUE]
-    dt[, rsi_momentum_short := TRUE]
-  }
-
-  # Entry Signals (ICHIMOKU)
   dt[, signal_raw := 0]
-  dt[tenkan_cross_up == TRUE &
-       price_above_cloud == TRUE &
-       adx_filter_long == TRUE &
-       adx_momentum_filter == TRUE &
-       rsi_filter_long == TRUE &
-       rsi_momentum_long == TRUE,
+  dt[hurst_trending == TRUE &
+       dpo_lag < 0 & dpo > 0 &
+       price_rising == TRUE &
+       adx_ok == TRUE,
      signal_raw := 1]
 
-  dt[tenkan_cross_down == TRUE &
-       price_below_cloud == TRUE &
-       adx_filter_short == TRUE &
-       adx_momentum_filter == TRUE &
-       rsi_filter_short == TRUE &
-       rsi_momentum_short == TRUE,
+  dt[hurst_trending == TRUE &
+       dpo_lag > 0 & dpo < 0 &
+       price_falling == TRUE &
+       adx_ok == TRUE,
      signal_raw := -1]
 
   dt[, chandelier_long := highest_high - (chandelier_multiplier * atr)]
@@ -779,12 +776,8 @@ generate_signals <- function(data,
 
   result <- as.data.frame(dt)
 
-  result <- result[, !names(result) %in% c("tenkan_cross_up", "tenkan_cross_down",
-                                           "price_above_cloud", "price_below_cloud",
-                                           "adx_filter_long", "adx_filter_short",
-                                           "adx_momentum", "adx_momentum_filter",
-                                           "rsi_filter_long", "rsi_filter_short",
-                                           "rsi_momentum", "rsi_momentum_long", "rsi_momentum_short",
+  result <- result[, !names(result) %in% c("dpo_lag", "hurst_trending",
+                                           "adx_ok", "price_rising", "price_falling",
                                            "chandelier_long", "chandelier_short")]
 
   return(result)
@@ -856,17 +849,16 @@ calculate_performance <- function(data) {
 }
 
 # ==============================================================================
-# BACKTEST WRAPPER
+# BACKTEST WRAPPER (aus 03_backtest angepasst)
 # ==============================================================================
 
 run_backtest <- function(data) {
 
   data <- calculate_indicators(
     data,
-    conversion_period = CONVERSION_PERIOD,
-    base_period = BASE_PERIOD,
-    leading_span_b = LEADING_SPAN_B,
-    displacement = DISPLACEMENT,
+    hurst_period = HURST_PERIOD,
+    dpo_period = DPO_PERIOD,
+    lookback_slope = LOOKBACK_SLOPE,
     atr_period = ATR_PERIOD,
     adx_period = ADX_PERIOD,
     chandelier_period = CHANDELIER_PERIOD
@@ -874,15 +866,10 @@ run_backtest <- function(data) {
 
   data <- generate_signals(
     data,
-    adx_threshold_long = ADX_THRESHOLD_LONG,
-    adx_threshold_short = ADX_THRESHOLD_SHORT,
-    use_rsi_filter = USE_RSI_FILTER,
-    rsi_short = RSI_SHORT,
-    rsi_long = RSI_LONG,
-    use_rsi_momentum = USE_RSI_MOMENTUM,
-    rsi_momentum_threshold = RSI_MOMENTUM_THRESHOLD,
-    use_adx_momentum = USE_ADX_MOMENTUM,
-    adx_momentum_threshold = ADX_MOMENTUM_THRESHOLD,
+    hurst_threshold = HURST_THRESHOLD,
+    use_price_confirmation = USE_PRICE_CONFIRMATION,
+    use_adx_filter = USE_ADX_FILTER,
+    adx_threshold = ADX_THRESHOLD,
     stop_loss_atr_mult = STOP_LOSS_ATR_MULT,
     use_pyramiding = USE_PYRAMIDING,
     pyramid_method = PYRAMID_METHOD,
@@ -1147,7 +1134,7 @@ p1 <- ggplot(df_plot_train, aes(x = metric)) +
            label = sprintf("Echte Performance\n%.4f", real_metric_train),
            hjust = -0.1, vjust = 2, color = "red", size = 4) +
   labs(
-    title = "MCPT: TRAINING-DATEN (Ichimoku mit Pyramiding)",
+    title = "MCPT: TRAINING-DATEN (Hurst-DPO mit Pyramiding)",
     subtitle = sprintf("p-Wert = %.4f | Metrik: %s | N = %d",
                        p_value_train, METRIC, N_PERMUTATIONS),
     x = METRIC,
@@ -1173,7 +1160,7 @@ if (nrow(test_data) > 0) {
              label = sprintf("Echte Performance\n%.4f", real_metric_test),
              hjust = -0.1, vjust = 2, color = "red", size = 4) +
     labs(
-      title = "MCPT: TEST-DATEN (Ichimoku mit Pyramiding)",
+      title = "MCPT: TEST-DATEN (Hurst-DPO mit Pyramiding)",
       subtitle = sprintf("p-Wert = %.4f | Metrik: %s | N = %d",
                          p_value_test, METRIC, N_PERMUTATIONS),
       x = METRIC,
@@ -1192,7 +1179,7 @@ p3 <- ggplot(train_perf$data, aes(x = date, y = equity_curve)) +
   geom_line(color = "darkgreen", linewidth = 1) +
   geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
   labs(
-    title = "In-Sample Equity Curve (Ichimoku mit Pyramiding)",
+    title = "In-Sample Equity Curve (Hurst-DPO mit Pyramiding)",
     subtitle = sprintf("Sharpe: %.2f | Return: %.2f%% | Trades: %d | p = %.4f",
                        train_perf$sharpe_ratio,
                        train_perf$total_return * 100,
@@ -1214,7 +1201,7 @@ if (nrow(test_data) > 0) {
     geom_line(color = "darkblue", linewidth = 1) +
     geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
     labs(
-      title = "Out-of-Sample Equity Curve (Ichimoku mit Pyramiding)",
+      title = "Out-of-Sample Equity Curve (Hurst-DPO mit Pyramiding)",
       subtitle = sprintf("Sharpe: %.2f | Return: %.2f%% | Trades: %d | p = %.4f",
                          test_perf$sharpe_ratio,
                          test_perf$total_return * 100,
@@ -1241,10 +1228,9 @@ cat("FINALE ZUSAMMENFASSUNG\n")
 cat("========================================\n\n")
 
 cat("Strategie-Parameter:\n")
-cat(sprintf("  Ichimoku: Conv=%d, Base=%d, SpanB=%d, Disp=%d\n",
-            CONVERSION_PERIOD, BASE_PERIOD, LEADING_SPAN_B, DISPLACEMENT))
-cat(sprintf("  ADX: Long>=%d, Short>=%d | RSI: Long>%d, Short<%d\n",
-            ADX_THRESHOLD_LONG, ADX_THRESHOLD_SHORT, RSI_LONG, RSI_SHORT))
+cat(sprintf("  Hurst: Period=%d, Threshold=%.2f\n", HURST_PERIOD, HURST_THRESHOLD))
+cat(sprintf("  DPO: Period=%d\n", DPO_PERIOD))
+cat(sprintf("  Price Slope Lookback: %d\n", LOOKBACK_SLOPE))
 cat(sprintf("  Pyramiding: %s | Method: %s | Max Orders: %d\n",
             USE_PYRAMIDING, PYRAMID_METHOD, MAX_PYRAMID_ORDERS))
 cat(sprintf("  Exit Strategy: %s | TP Strategy: %s\n",
