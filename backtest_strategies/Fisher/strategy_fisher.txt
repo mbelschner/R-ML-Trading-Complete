@@ -1,5 +1,5 @@
 //@version=5
-strategy("Fisher Transform Strategie", overlay=true, pyramiding=3, initial_capital=300, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.cash_per_contract, commission_value=0.35)
+strategy("Fisher Transform Strategie", overlay=true, pyramiding=3, initial_capital=300, default_qty_type=strategy.fixed, default_qty_value=1, commission_type=strategy.commission.cash_per_contract, commission_value=0.35)
 
 // ============================================================================
 // PARAMETER - ENTRY SIGNALS
@@ -49,7 +49,6 @@ partial_tp_2_size = input.float(0.33, "Partial TP Level 2 Size (33%)", minval=0,
 
 // Time Exit
 close_time_hour = input.int(22, "Tägliche Close Time (Stunde)", minval=0, maxval=23, group="Time Management")
-max_bars_in_trade = input.int(100, "Max Bars in Trade", minval=1, group="Time Management")
 
 // ============================================================================
 // INDIKATOREN BERECHNEN
@@ -105,7 +104,6 @@ shortCondition = bars_below >= confirmation_bars and bars_below[confirmation_bar
 
 var int pyramid_count = 0
 var float last_entry_price = na
-var int entry_bar = 0
 var float total_position_size = 0.0
 
 breakout_long = use_pyramiding and pyramid_method == "breakout" and strategy.position_size > 0 and high > ta.highest(high[1], breakout_lookback)
@@ -139,30 +137,24 @@ var float lowest_price = na
 // Time Exit
 time_exit = hour == close_time_hour
 
-// Max Bars Exit
-bars_in_trade = bar_index - entry_bar
-max_bars_exit = bars_in_trade >= max_bars_in_trade and strategy.position_size != 0
-
 // ============================================================================
 // STRATEGY EXECUTION
 // ============================================================================
 
 // Entry
 if longCondition and strategy.position_size == 0
-    strategy.entry("Long", strategy.long, qty=1.0)
+    strategy.entry("Long", strategy.long)
     pyramid_count := 1
     last_entry_price := close
-    entry_bar := bar_index
     total_position_size := 1.0
     partial_tp_1_done := false
     partial_tp_2_done := false
     highest_price := high
 
 if shortCondition and strategy.position_size == 0
-    strategy.entry("Short", strategy.short, qty=1.0)
+    strategy.entry("Short", strategy.short)
     pyramid_count := 1
     last_entry_price := close
-    entry_bar := bar_index
     total_position_size := 1.0
     partial_tp_1_done := false
     partial_tp_2_done := false
@@ -291,11 +283,10 @@ if strategy.position_size < 0
             strategy.exit("Exit Short", "Short", stop=short_stop, limit=final_tp)
 
 // Time Exit (22:00)
-if time_exit or max_bars_exit
-    strategy.close_all(time_exit ? "Time Exit 22h" : "Max Bars Exit")
+if time_exit
+    strategy.close_all("Time Exit 22h")
     pyramid_count := 0
     last_entry_price := na
-    entry_bar := 0
     total_position_size := 0.0
     partial_tp_1_done := false
     partial_tp_2_done := false
@@ -308,7 +299,6 @@ if time_exit or max_bars_exit
 if strategy.position_size == 0
     pyramid_count := 0
     last_entry_price := na
-    entry_bar := 0
     total_position_size := 0.0
     partial_tp_1_done := false
     partial_tp_2_done := false

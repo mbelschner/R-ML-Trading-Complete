@@ -207,8 +207,7 @@ generate_signals <- function(data,
                              partial_tp_2_size = 0.33,
                              
                              # Time Exit
-                             close_time_hour = 22,
-                             max_bars_in_trade = 100) {
+                             close_time_hour = 22) {
   
   dt <- as.data.table(data)
   n <- nrow(dt)
@@ -288,7 +287,6 @@ generate_signals <- function(data,
   total_position_size <- 0
   highest_price <- -Inf
   lowest_price <- Inf
-  entry_bar <- 0L
   breakeven_moved <- FALSE
   trailing_active <- FALSE
   partial_tp_1_done <- FALSE
@@ -325,7 +323,6 @@ generate_signals <- function(data,
       total_position_size <- 0
       highest_price <- -Inf
       lowest_price <- Inf
-      entry_bar <- 0L
       breakeven_moved <- FALSE
       trailing_active <- FALSE
       partial_tp_1_done <- FALSE
@@ -469,29 +466,8 @@ generate_signals <- function(data,
     # EXIT LOGIC
     # ========================================
     else if (current_position != 0L && !is.na(current_sl) && !is.na(current_tp)) {
-      
+
       atr_i <- atr_vec[i]
-      bars_in_trade <- i - entry_bar
-      
-      # Max Bars Exit
-      if (bars_in_trade >= max_bars_in_trade) {
-        current_position <- 0L
-        exit_reason_vec[i] <- "Max_Bars"
-        current_entry <- NA_real_
-        current_sl <- NA_real_
-        current_tp <- NA_real_
-        pyramid_count <- 0L
-        pyramid_entries <- numeric(0)
-        total_position_size <- 0
-        highest_price <- -Inf
-        lowest_price <- Inf
-        entry_bar <- 0L
-        breakeven_moved <- FALSE
-        trailing_active <- FALSE
-        partial_tp_1_done <- FALSE
-        partial_tp_2_done <- FALSE
-        next
-      }
       
       if (current_position == 1L) {  # ========== LONG POSITION ==========
         
@@ -527,7 +503,6 @@ generate_signals <- function(data,
               pyramid_entries <- numeric(0)
               total_position_size <- 0
               highest_price <- -Inf
-              entry_bar <- 0L
               breakeven_moved <- FALSE
               trailing_active <- FALSE
               partial_tp_1_done <- FALSE
@@ -552,7 +527,6 @@ generate_signals <- function(data,
               pyramid_entries <- numeric(0)
               total_position_size <- 0
               highest_price <- -Inf
-              entry_bar <- 0L
               breakeven_moved <- FALSE
               trailing_active <- FALSE
               partial_tp_1_done <- FALSE
@@ -619,7 +593,6 @@ generate_signals <- function(data,
           pyramid_entries <- numeric(0)
           total_position_size <- 0
           highest_price <- -Inf
-          entry_bar <- 0L
           breakeven_moved <- FALSE
           trailing_active <- FALSE
           partial_tp_1_done <- FALSE
@@ -642,7 +615,6 @@ generate_signals <- function(data,
           pyramid_entries <- numeric(0)
           total_position_size <- 0
           highest_price <- -Inf
-          entry_bar <- 0L
           breakeven_moved <- FALSE
           trailing_active <- FALSE
           partial_tp_1_done <- FALSE
@@ -681,7 +653,6 @@ generate_signals <- function(data,
               pyramid_entries <- numeric(0)
               total_position_size <- 0
               lowest_price <- Inf
-              entry_bar <- 0L
               breakeven_moved <- FALSE
               trailing_active <- FALSE
               partial_tp_1_done <- FALSE
@@ -705,7 +676,6 @@ generate_signals <- function(data,
               pyramid_entries <- numeric(0)
               total_position_size <- 0
               lowest_price <- Inf
-              entry_bar <- 0L
               breakeven_moved <- FALSE
               trailing_active <- FALSE
               partial_tp_1_done <- FALSE
@@ -771,7 +741,6 @@ generate_signals <- function(data,
           pyramid_entries <- numeric(0)
           total_position_size <- 0
           lowest_price <- Inf
-          entry_bar <- 0L
           breakeven_moved <- FALSE
           trailing_active <- FALSE
           partial_tp_1_done <- FALSE
@@ -794,7 +763,6 @@ generate_signals <- function(data,
           pyramid_entries <- numeric(0)
           total_position_size <- 0
           lowest_price <- Inf
-          entry_bar <- 0L
           breakeven_moved <- FALSE
           trailing_active <- FALSE
           partial_tp_1_done <- FALSE
@@ -951,10 +919,9 @@ run_backtest <- function(data, params) {
     partial_tp_1_size = params$partial_tp_1_size,
     partial_tp_2_atr = params$partial_tp_2_atr,
     partial_tp_2_size = params$partial_tp_2_size,
-    close_time_hour = params$close_time_hour,
-    max_bars_in_trade = params$max_bars_in_trade
+    close_time_hour = params$close_time_hour
   )
-  
+
   perf <- calculate_performance(data)
   
   return(perf)
@@ -1385,10 +1352,9 @@ run_backtest_detailed <- function(data, params) {
     partial_tp_1_size = params$partial_tp_1_size,
     partial_tp_2_atr = params$partial_tp_2_atr,
     partial_tp_2_size = params$partial_tp_2_size,
-    close_time_hour = params$close_time_hour,
-    max_bars_in_trade = params$max_bars_in_trade
+    close_time_hour = params$close_time_hour
   )
-  
+
   perf <- calculate_performance_detailed(data)
   
   return(perf)
@@ -1445,8 +1411,7 @@ param_grid <- expand.grid(
   partial_tp_2_size = c(0.33),
   
   # Time
-  close_time_hour = 22,
-  max_bars_in_trade = c(80, 100)
+  close_time_hour = 22
 )
 
 # Filter
