@@ -1,0 +1,81 @@
+//@version=5
+indicator("STC (Schaff Trend Cycle) Indikator", overlay=false)
+
+// ============================================================================
+// PARAMETER
+// ============================================================================
+
+// STC Parameter
+stc_fast = input.int(23, "STC Fast Period (MACD)", minval=1)
+stc_slow = input.int(50, "STC Slow Period (MACD)", minval=1)
+stc_cycle = input.int(10, "STC Cycle Length", minval=1)
+stc_smooth1 = input.int(3, "STC Smooth 1 (First Stoch)", minval=1)
+stc_smooth2 = input.int(3, "STC Smooth 2 (Second Stoch)", minval=1)
+
+// ============================================================================
+// BERECHNUNGEN
+// ============================================================================
+
+// === SCHAFF TREND CYCLE (STC) ===
+// Der STC ist ein fortgeschrittener Oszillator, der MACD mit Stochastik kombiniert
+// Er liefert frühere Signale als MACD mit weniger Whipsaws
+
+// Schritt 1: MACD Berechnung
+fast_ema = ta.ema(close, stc_fast)
+slow_ema = ta.ema(close, stc_slow)
+macd_line = fast_ema - slow_ema
+
+// Schritt 2: Erste Stochastik auf MACD anwenden
+macd_min = ta.lowest(macd_line, stc_cycle)
+macd_max = ta.highest(macd_line, stc_cycle)
+
+// Stochastik Formel: %K = 100 * (Current - Min) / (Max - Min)
+stoch1 = macd_max != macd_min ? 100 * (macd_line - macd_min) / (macd_max - macd_min) : 50
+
+// Glätten mit EMA
+stoch1_smooth = ta.ema(stoch1, stc_smooth1)
+
+// Schritt 3: Zweite Stochastik auf geglättete erste Stochastik
+stoch1_min = ta.lowest(stoch1_smooth, stc_cycle)
+stoch1_max = ta.highest(stoch1_smooth, stc_cycle)
+
+// Zweite Stochastik
+stc = stoch1_max != stoch1_min ? 100 * (stoch1_smooth - stoch1_min) / (stoch1_max - stoch1_min) : 50
+
+// Finales Glätten
+stc_final = ta.ema(stc, stc_smooth2)
+
+// ============================================================================
+// PLOTS
+// ============================================================================
+
+// STC Hauptlinie
+plot(stc_final, "STC", color=color.blue, linewidth=3)
+
+// Kritische Levels
+hline(25, "Long Entry (Cross Above)", color=color.green, linestyle=hline.style_solid, linewidth=2)
+hline(75, "Short Entry (Cross Below)", color=color.red, linestyle=hline.style_solid, linewidth=2)
+hline(50, "Mittellinie", color=color.gray, linestyle=hline.style_dotted)
+
+// Overbought/Oversold Zonen
+upper_band = hline(100, "Overbought", color=color.gray)
+lower_band = hline(0, "Oversold", color=color.gray)
+fill(upper_band, hline(75), color=color.new(color.red, 90), title="Overbought Zone")
+fill(lower_band, hline(25), color=color.new(color.green, 90), title="Oversold Zone")
+
+// Hintergrundfarbe für Trading Zonen
+bgcolor(stc_final > 75 ? color.new(color.red, 95) : stc_final < 25 ? color.new(color.green, 95) : na, title="Extreme Zones")
+
+// Crossover Signale
+bullish_cross = ta.crossover(stc_final, 25)
+bearish_cross = ta.crossunder(stc_final, 75)
+exit_long = ta.crossover(stc_final, 75)
+exit_short = ta.crossunder(stc_final, 25)
+
+plotshape(bullish_cross, "Long Signal", shape.triangleup, location.bottom, color.green, size=size.small)
+plotshape(bearish_cross, "Short Signal", shape.triangledown, location.top, color.red, size=size.small)
+plotshape(exit_long, "Exit Long", shape.xcross, location.top, color.new(color.orange, 0), size=size.tiny)
+plotshape(exit_short, "Exit Short", shape.xcross, location.bottom, color.new(color.orange, 0), size=size.tiny)
+
+// Zusatzinformation: MACD (optional, zum Vergleich)
+plot(macd_line * 10, "MACD (x10)", color=color.new(color.purple, 70), linewidth=1, display=display.none)

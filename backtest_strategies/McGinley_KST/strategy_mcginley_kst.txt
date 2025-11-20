@@ -1,0 +1,177 @@
+//@version=5
+strategy("McGinley Dynamic - KST Strategie", overlay=true, pyramiding=3, initial_capital=300, default_qty_type=strategy.fixed, default_qty_value=1.2)
+
+// ============================================================================
+// PARAMETER - ENTRY SIGNALS
+// ============================================================================
+
+md_period = input.int(14, "McGinley Dynamic Period", minval=1, group="McGinley Dynamic")
+
+kst_roc1 = input.int(6, "KST ROC 1", minval=1, group="KST")
+kst_roc2 = input.int(9, "KST ROC 2", minval=1, group="KST")
+kst_roc3 = input.int(12, "KST ROC 3", minval=1, group="KST")
+kst_roc4 = input.int(18, "KST ROC 4", minval=1, group="KST")
+kst_sma1 = input.int(10, "KST SMA 1", minval=1, group="KST")
+kst_sma2 = input.int(10, "KST SMA 2", minval=1, group="KST")
+kst_sma3 = input.int(10, "KST SMA 3", minval=1, group="KST")
+kst_sma4 = input.int(15, "KST SMA 4", minval=1, group="KST")
+kst_signal_period = input.int(6, "KST Signal Period", minval=1, group="KST")
+
+// ============================================================================
+// PARAMETER - PYRAMIDING
+// ============================================================================
+
+use_pyramiding = input.bool(true, "Pyramiding aktivieren", group="Pyramiding")
+pyramid_method = input.string("breakout", "Pyramiding Methode", options=["breakout", "consecutive"], group="Pyramiding")
+max_pyramid_orders = input.int(3, "Max Pyramid Orders", minval=1, maxval=10, group="Pyramiding")
+pyramid_spacing_atr = input.float(0.5, "Pyramid Spacing (ATR)", minval=0, group="Pyramiding")
+consecutive_bars = input.int(2, "Consecutive Bars", minval=1, group="Pyramiding")
+breakout_lookback = input.int(20, "Breakout Lookback", minval=1, group="Pyramiding")
+
+// ============================================================================
+// PARAMETER - EXITS
+// ============================================================================
+
+exit_strategy = input.string("chandelier", "Exit Strategie", options=["chandelier", "breakeven_trailing"], group="Exit Strategy")
+stop_loss_atr_mult = input.float(3.0, "Initial Stop Loss (ATR)", minval=0, group="Stop Loss")
+chandelier_period = input.int(22, "Chandelier Period", minval=1, group="Chandelier Exit")
+chandelier_multiplier = input.float(3.0, "Chandelier ATR Multiplier", minval=0, group="Chandelier Exit")
+full_tp_atr_mult = input.float(4.5, "Take Profit (ATR)", minval=0, group="Take Profit")
+close_time_hour = input.int(22, "Tägliche Close Time", minval=0, maxval=23, group="Time Management")
+
+// ============================================================================
+// INDIKATOREN BERECHNEN
+// ============================================================================
+
+// ATR
+atr = ta.atr(14)
+
+// === MCGINLEY DYNAMIC ===
+var float md = na
+
+if bar_index < md_period
+    md := na
+else if bar_index == md_period
+    md := ta.sma(close, md_period)
+else
+    if md[1] != 0
+        adjustment = (close - md[1]) / (md_period * math.pow(close / md[1], 4))
+        md := md[1] + adjustment
+    else
+        md := close
+
+// === KST ===
+roc1 = ta.roc(close, kst_roc1)
+roc2 = ta.roc(close, kst_roc2)
+roc3 = ta.roc(close, kst_roc3)
+roc4 = ta.roc(close, kst_roc4)
+
+rcma1 = ta.sma(roc1, kst_sma1)
+rcma2 = ta.sma(roc2, kst_sma2)
+rcma3 = ta.sma(roc3, kst_sma3)
+rcma4 = ta.sma(roc4, kst_sma4)
+
+kst = (rcma1 * 1) + (rcma2 * 2) + (rcma3 * 3) + (rcma4 * 4)
+kst_signal = ta.sma(kst, kst_signal_period)
+
+// Chandelier Exit
+chandelier_long = ta.highest(high, chandelier_period) - (chandelier_multiplier * atr)
+chandelier_short = ta.lowest(low, chandelier_period) + (chandelier_multiplier * atr)
+
+// ============================================================================
+// ENTRY BEDINGUNGEN
+// ============================================================================
+
+// Long: Price > McGinley + KST > 0 + KST > Signal + KST rising
+longCondition = close > md and kst > 0 and kst > kst_signal and kst > kst[1]
+
+// Short: Price < McGinley + KST < 0 + KST < Signal + KST falling
+shortCondition = close < md and kst < 0 and kst < kst_signal and kst < kst[1]
+
+// ============================================================================
+// PYRAMIDING BEDINGUNGEN
+// ============================================================================
+
+var int pyramid_count = 0
+var float last_entry_price = na
+
+breakout_long = use_pyramiding and pyramid_method == "breakout" and strategy.position_size > 0 and high > ta.highest(high[1], breakout_lookback)
+breakout_short = use_pyramiding and pyramid_method == "breakout" and strategy.position_size < 0 and low < ta.lowest(low[1], breakout_lookback)
+
+consecutive_long = use_pyramiding and pyramid_method == "consecutive" and strategy.position_size > 0
+consecutive_short = use_pyramiding and pyramid_method == "consecutive" and strategy.position_size < 0
+for i = 1 to consecutive_bars
+    consecutive_long := consecutive_long and close[i] > close[i+1]
+    consecutive_short := consecutive_short and close[i] < close[i+1]
+
+spacing_ok_long = na(last_entry_price) or close > last_entry_price + (pyramid_spacing_atr * atr)
+spacing_ok_short = na(last_entry_price) or close < last_entry_price - (pyramid_spacing_atr * atr)
+
+pyramid_long = (breakout_long or consecutive_long) and spacing_ok_long and pyramid_count < max_pyramid_orders
+pyramid_short = (breakout_short or consecutive_short) and spacing_ok_short and pyramid_count < max_pyramid_orders
+
+// ============================================================================
+// STRATEGY EXECUTION
+// ============================================================================
+
+// Entry
+if longCondition and strategy.position_size == 0
+    strategy.entry("Long", strategy.long)
+    pyramid_count := 1
+    last_entry_price := close
+
+if shortCondition and strategy.position_size == 0
+    strategy.entry("Short", strategy.short)
+    pyramid_count := 1
+    last_entry_price := close
+
+// Pyramiding
+if pyramid_long
+    strategy.entry("Long", strategy.long)
+    pyramid_count += 1
+    last_entry_price := close
+
+if pyramid_short
+    strategy.entry("Short", strategy.short)
+    pyramid_count += 1
+    last_entry_price := close
+
+// Exits
+if strategy.position_size > 0
+    if exit_strategy == "chandelier"
+        strategy.exit("Exit Long", "Long", stop=chandelier_long, limit=close + (full_tp_atr_mult * atr))
+    else
+        initial_stop = strategy.position_avg_price - (stop_loss_atr_mult * atr)
+        strategy.exit("Exit Long", "Long", stop=initial_stop, limit=close + (full_tp_atr_mult * atr))
+
+if strategy.position_size < 0
+    if exit_strategy == "chandelier"
+        strategy.exit("Exit Short", "Short", stop=chandelier_short, limit=close - (full_tp_atr_mult * atr))
+    else
+        initial_stop = strategy.position_avg_price + (stop_loss_atr_mult * atr)
+        strategy.exit("Exit Short", "Short", stop=initial_stop, limit=close - (full_tp_atr_mult * atr))
+
+// Time Exit
+if hour == close_time_hour
+    strategy.close_all("Time Exit 22h")
+    pyramid_count := 0
+    last_entry_price := na
+
+if strategy.position_size == 0
+    pyramid_count := 0
+    last_entry_price := na
+
+// ============================================================================
+// VISUALISIERUNG
+// ============================================================================
+
+plot(md, "McGinley Dynamic", color=color.blue, linewidth=2)
+plotshape(longCondition, "Long Entry", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(shortCondition, "Short Entry", shape.triangledown, location.abovebar, color.red, size=size.small)
+plot(exit_strategy == "chandelier" and strategy.position_size > 0 ? chandelier_long : na, "Chandelier Stop Long", color.red, linewidth=2)
+plot(exit_strategy == "chandelier" and strategy.position_size < 0 ? chandelier_short : na, "Chandelier Stop Short", color.red, linewidth=2)
+plotshape(pyramid_long, "Pyramid Long", shape.diamond, location.belowbar, color.new(color.green, 50), size=size.tiny)
+plotshape(pyramid_short, "Pyramid Short", shape.diamond, location.abovebar, color.new(color.red, 50), size=size.tiny)
+
+// Price vs McGinley
+bgcolor(close > md ? color.new(color.blue, 97) : color.new(color.orange, 97), title="Price vs McGinley")

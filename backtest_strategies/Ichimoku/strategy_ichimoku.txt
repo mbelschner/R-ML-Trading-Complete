@@ -1,0 +1,192 @@
+//@version=5
+strategy("Ichimoku Cloud Strategie", overlay=true, pyramiding=3, initial_capital=300, default_qty_type=strategy.fixed, default_qty_value=1.2)
+
+// ============================================================================
+// PARAMETER - ENTRY SIGNALS
+// ============================================================================
+
+tenkan_period = input.int(9, "Tenkan-sen Period", minval=1, group="Ichimoku")
+kijun_period = input.int(26, "Kijun-sen Period", minval=1, group="Ichimoku")
+senkou_span_b_period = input.int(52, "Senkou Span B Period", minval=1, group="Ichimoku")
+displacement = input.int(26, "Displacement", minval=1, group="Ichimoku")
+
+use_adx_filter = input.bool(true, "ADX Filter verwenden", group="Filters")
+adx_period = input.int(14, "ADX Period", minval=1, group="Filters")
+adx_threshold = input.float(20, "ADX Threshold", minval=0, group="Filters")
+
+use_rsi_filter = input.bool(true, "RSI Filter verwenden", group="Filters")
+rsi_period = input.int(14, "RSI Period", minval=1, group="Filters")
+rsi_ob = input.float(70, "RSI Overbought", minval=50, maxval=100, group="Filters")
+rsi_os = input.float(30, "RSI Oversold", minval=0, maxval=50, group="Filters")
+
+// ============================================================================
+// PARAMETER - PYRAMIDING
+// ============================================================================
+
+use_pyramiding = input.bool(true, "Pyramiding aktivieren", group="Pyramiding")
+pyramid_method = input.string("breakout", "Pyramiding Methode", options=["breakout", "consecutive"], group="Pyramiding")
+max_pyramid_orders = input.int(3, "Max Pyramid Orders", minval=1, maxval=10, group="Pyramiding")
+pyramid_spacing_atr = input.float(0.5, "Pyramid Spacing (ATR)", minval=0, group="Pyramiding")
+consecutive_bars = input.int(2, "Consecutive Bars", minval=1, group="Pyramiding")
+breakout_lookback = input.int(20, "Breakout Lookback", minval=1, group="Pyramiding")
+
+// ============================================================================
+// PARAMETER - EXITS
+// ============================================================================
+
+exit_strategy = input.string("chandelier", "Exit Strategie", options=["chandelier", "breakeven_trailing"], group="Exit Strategy")
+stop_loss_atr_mult = input.float(3.0, "Initial Stop Loss (ATR)", minval=0, group="Stop Loss")
+chandelier_period = input.int(22, "Chandelier Period", minval=1, group="Chandelier Exit")
+chandelier_multiplier = input.float(3.0, "Chandelier ATR Multiplier", minval=0, group="Chandelier Exit")
+full_tp_atr_mult = input.float(4.5, "Take Profit (ATR)", minval=0, group="Take Profit")
+close_time_hour = input.int(22, "Tägliche Close Time", minval=0, maxval=23, group="Time Management")
+
+// ============================================================================
+// INDIKATOREN BERECHNEN
+// ============================================================================
+
+// ATR
+atr = ta.atr(14)
+
+// === ICHIMOKU ===
+tenkan = (ta.highest(high, tenkan_period) + ta.lowest(low, tenkan_period)) / 2
+kijun = (ta.highest(high, kijun_period) + ta.lowest(low, kijun_period)) / 2
+senkou_span_a = (tenkan + kijun) / 2
+senkou_span_b = (ta.highest(high, senkou_span_b_period) + ta.lowest(low, senkou_span_b_period)) / 2
+chikou = close
+
+cloud_top = math.max(senkou_span_a, senkou_span_b)
+cloud_bottom = math.min(senkou_span_a, senkou_span_b)
+
+// === FILTERS ===
+[diplus, diminus, adx] = ta.dmi(adx_period, adx_period)
+rsi = ta.rsi(close, rsi_period)
+
+// Chandelier Exit
+chandelier_long = ta.highest(high, chandelier_period) - (chandelier_multiplier * atr)
+chandelier_short = ta.lowest(low, chandelier_period) + (chandelier_multiplier * atr)
+
+// ============================================================================
+// ENTRY BEDINGUNGEN
+// ============================================================================
+
+// Price Position
+price_above_cloud = close > cloud_top[displacement]
+price_below_cloud = close < cloud_bottom[displacement]
+
+// Tenkan/Kijun Cross
+tk_cross_bullish = ta.crossover(tenkan, kijun)
+tk_cross_bearish = ta.crossunder(tenkan, kijun)
+
+// Filter Checks
+adx_ok = use_adx_filter ? adx >= adx_threshold : true
+rsi_not_overbought = use_rsi_filter ? rsi < rsi_ob : true
+rsi_not_oversold = use_rsi_filter ? rsi > rsi_os : true
+
+// Long: Tenkan crosses above Kijun + Price above Cloud + Filters OK
+longCondition = tk_cross_bullish and price_above_cloud and adx_ok and rsi_not_overbought
+
+// Short: Tenkan crosses below Kijun + Price below Cloud + Filters OK
+shortCondition = tk_cross_bearish and price_below_cloud and adx_ok and rsi_not_oversold
+
+// ============================================================================
+// PYRAMIDING BEDINGUNGEN
+// ============================================================================
+
+var int pyramid_count = 0
+var float last_entry_price = na
+
+breakout_long = use_pyramiding and pyramid_method == "breakout" and strategy.position_size > 0 and high > ta.highest(high[1], breakout_lookback)
+breakout_short = use_pyramiding and pyramid_method == "breakout" and strategy.position_size < 0 and low < ta.lowest(low[1], breakout_lookback)
+
+consecutive_long = use_pyramiding and pyramid_method == "consecutive" and strategy.position_size > 0
+consecutive_short = use_pyramiding and pyramid_method == "consecutive" and strategy.position_size < 0
+for i = 1 to consecutive_bars
+    consecutive_long := consecutive_long and close[i] > close[i+1]
+    consecutive_short := consecutive_short and close[i] < close[i+1]
+
+spacing_ok_long = na(last_entry_price) or close > last_entry_price + (pyramid_spacing_atr * atr)
+spacing_ok_short = na(last_entry_price) or close < last_entry_price - (pyramid_spacing_atr * atr)
+
+pyramid_long = (breakout_long or consecutive_long) and spacing_ok_long and pyramid_count < max_pyramid_orders
+pyramid_short = (breakout_short or consecutive_short) and spacing_ok_short and pyramid_count < max_pyramid_orders
+
+// ============================================================================
+// STRATEGY EXECUTION
+// ============================================================================
+
+// Entry
+if longCondition and strategy.position_size == 0
+    strategy.entry("Long", strategy.long)
+    pyramid_count := 1
+    last_entry_price := close
+
+if shortCondition and strategy.position_size == 0
+    strategy.entry("Short", strategy.short)
+    pyramid_count := 1
+    last_entry_price := close
+
+// Pyramiding
+if pyramid_long
+    strategy.entry("Long", strategy.long)
+    pyramid_count += 1
+    last_entry_price := close
+
+if pyramid_short
+    strategy.entry("Short", strategy.short)
+    pyramid_count += 1
+    last_entry_price := close
+
+// Exits
+if strategy.position_size > 0
+    if exit_strategy == "chandelier"
+        strategy.exit("Exit Long", "Long", stop=chandelier_long, limit=close + (full_tp_atr_mult * atr))
+    else
+        initial_stop = strategy.position_avg_price - (stop_loss_atr_mult * atr)
+        strategy.exit("Exit Long", "Long", stop=initial_stop, limit=close + (full_tp_atr_mult * atr))
+
+if strategy.position_size < 0
+    if exit_strategy == "chandelier"
+        strategy.exit("Exit Short", "Short", stop=chandelier_short, limit=close - (full_tp_atr_mult * atr))
+    else
+        initial_stop = strategy.position_avg_price + (stop_loss_atr_mult * atr)
+        strategy.exit("Exit Short", "Short", stop=initial_stop, limit=close - (full_tp_atr_mult * atr))
+
+// Time Exit
+if hour == close_time_hour
+    strategy.close_all("Time Exit 22h")
+    pyramid_count := 0
+    last_entry_price := na
+
+if strategy.position_size == 0
+    pyramid_count := 0
+    last_entry_price := na
+
+// ============================================================================
+// VISUALISIERUNG
+// ============================================================================
+
+// Ichimoku Komponenten
+plot(tenkan, "Tenkan-sen", color=color.red, linewidth=2)
+plot(kijun, "Kijun-sen", color=color.blue, linewidth=2)
+
+p1 = plot(senkou_span_a[displacement], "Senkou Span A", color=color.green, offset=displacement)
+p2 = plot(senkou_span_b[displacement], "Senkou Span B", color=color.red, offset=displacement)
+fill(p1, p2, color=senkou_span_a > senkou_span_b ? color.new(color.green, 90) : color.new(color.red, 90), title="Cloud")
+
+plot(chikou, "Chikou Span", color=color.purple, linewidth=1, offset=-displacement)
+
+// Entry Signale
+plotshape(longCondition, "Long Entry", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(shortCondition, "Short Entry", shape.triangledown, location.abovebar, color.red, size=size.small)
+
+// Exits
+plot(exit_strategy == "chandelier" and strategy.position_size > 0 ? chandelier_long : na, "Chandelier Stop Long", color.red, linewidth=2)
+plot(exit_strategy == "chandelier" and strategy.position_size < 0 ? chandelier_short : na, "Chandelier Stop Short", color.red, linewidth=2)
+
+// Pyramiding
+plotshape(pyramid_long, "Pyramid Long", shape.diamond, location.belowbar, color.new(color.green, 50), size=size.tiny)
+plotshape(pyramid_short, "Pyramid Short", shape.diamond, location.abovebar, color.new(color.red, 50), size=size.tiny)
+
+// Hintergrund
+bgcolor(price_above_cloud ? color.new(color.green, 97) : price_below_cloud ? color.new(color.red, 97) : color.new(color.gray, 97), title="Price vs Cloud")

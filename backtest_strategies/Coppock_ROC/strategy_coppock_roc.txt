@@ -1,0 +1,157 @@
+//@version=5
+strategy("Coppock-ROC Strategie", overlay=true, pyramiding=3, initial_capital=300, default_qty_type=strategy.fixed, default_qty_value=1.2)
+
+// ============================================================================
+// PARAMETER - ENTRY SIGNALS
+// ============================================================================
+
+coppock_roc1 = input.int(7, "Coppock ROC 1", minval=1, group="Coppock Curve")
+coppock_roc2 = input.int(10, "Coppock ROC 2", minval=1, group="Coppock Curve")
+coppock_wma = input.int(8, "Coppock WMA", minval=1, group="Coppock Curve")
+
+roc_short = input.int(3, "ROC Short", minval=1, group="ROC Confirmation")
+roc_medium = input.int(5, "ROC Medium", minval=1, group="ROC Confirmation")
+roc_long = input.int(8, "ROC Long", minval=1, group="ROC Confirmation")
+
+// ============================================================================
+// PARAMETER - PYRAMIDING
+// ============================================================================
+
+use_pyramiding = input.bool(true, "Pyramiding aktivieren", group="Pyramiding")
+pyramid_method = input.string("breakout", "Pyramiding Methode", options=["breakout", "consecutive"], group="Pyramiding")
+max_pyramid_orders = input.int(3, "Max Pyramid Orders", minval=1, maxval=10, group="Pyramiding")
+pyramid_spacing_atr = input.float(0.5, "Pyramid Spacing (ATR)", minval=0, group="Pyramiding")
+consecutive_bars = input.int(2, "Consecutive Bars", minval=1, group="Pyramiding")
+breakout_lookback = input.int(20, "Breakout Lookback", minval=1, group="Pyramiding")
+
+// ============================================================================
+// PARAMETER - EXITS
+// ============================================================================
+
+exit_strategy = input.string("chandelier", "Exit Strategie", options=["chandelier", "breakeven_trailing"], group="Exit Strategy")
+stop_loss_atr_mult = input.float(3.0, "Initial Stop Loss (ATR)", minval=0, group="Stop Loss")
+chandelier_period = input.int(22, "Chandelier Period", minval=1, group="Chandelier Exit")
+chandelier_multiplier = input.float(3.0, "Chandelier ATR Multiplier", minval=0, group="Chandelier Exit")
+full_tp_atr_mult = input.float(4.5, "Take Profit (ATR)", minval=0, group="Take Profit")
+close_time_hour = input.int(22, "Tägliche Close Time", minval=0, maxval=23, group="Time Management")
+
+// ============================================================================
+// INDIKATOREN BERECHNEN
+// ============================================================================
+
+// ATR
+atr = ta.atr(14)
+
+// === COPPOCK CURVE ===
+roc_1 = ta.roc(close, coppock_roc1)
+roc_2 = ta.roc(close, coppock_roc2)
+coppock = ta.wma(roc_1 + roc_2, coppock_wma)
+coppock_prev = ta.wma(roc_1[1] + roc_2[1], coppock_wma)
+
+// === MULTI-ROC ===
+roc_s = ta.roc(close, roc_short)
+roc_m = ta.roc(close, roc_medium)
+roc_l = ta.roc(close, roc_long)
+
+// Chandelier Exit
+chandelier_long = ta.highest(high, chandelier_period) - (chandelier_multiplier * atr)
+chandelier_short = ta.lowest(low, chandelier_period) + (chandelier_multiplier * atr)
+
+// ============================================================================
+// ENTRY BEDINGUNGEN
+// ============================================================================
+
+// Long: Coppock dreht positiv + alle ROCs positiv
+longCondition = coppock_prev < 0 and coppock > 0 and roc_s > 0 and roc_m > 0 and roc_l > 0
+
+// Short: Coppock dreht negativ + alle ROCs negativ
+shortCondition = coppock_prev > 0 and coppock < 0 and roc_s < 0 and roc_m < 0 and roc_l < 0
+
+// ============================================================================
+// PYRAMIDING BEDINGUNGEN
+// ============================================================================
+
+var int pyramid_count = 0
+var float last_entry_price = na
+
+breakout_long = use_pyramiding and pyramid_method == "breakout" and strategy.position_size > 0 and high > ta.highest(high[1], breakout_lookback)
+breakout_short = use_pyramiding and pyramid_method == "breakout" and strategy.position_size < 0 and low < ta.lowest(low[1], breakout_lookback)
+
+consecutive_long = use_pyramiding and pyramid_method == "consecutive" and strategy.position_size > 0
+consecutive_short = use_pyramiding and pyramid_method == "consecutive" and strategy.position_size < 0
+for i = 1 to consecutive_bars
+    consecutive_long := consecutive_long and close[i] > close[i+1]
+    consecutive_short := consecutive_short and close[i] < close[i+1]
+
+spacing_ok_long = na(last_entry_price) or close > last_entry_price + (pyramid_spacing_atr * atr)
+spacing_ok_short = na(last_entry_price) or close < last_entry_price - (pyramid_spacing_atr * atr)
+
+pyramid_long = (breakout_long or consecutive_long) and spacing_ok_long and pyramid_count < max_pyramid_orders
+pyramid_short = (breakout_short or consecutive_short) and spacing_ok_short and pyramid_count < max_pyramid_orders
+
+// ============================================================================
+// STRATEGY EXECUTION
+// ============================================================================
+
+// Entry
+if longCondition and strategy.position_size == 0
+    strategy.entry("Long", strategy.long)
+    pyramid_count := 1
+    last_entry_price := close
+
+if shortCondition and strategy.position_size == 0
+    strategy.entry("Short", strategy.short)
+    pyramid_count := 1
+    last_entry_price := close
+
+// Pyramiding
+if pyramid_long
+    strategy.entry("Long", strategy.long)
+    pyramid_count += 1
+    last_entry_price := close
+
+if pyramid_short
+    strategy.entry("Short", strategy.short)
+    pyramid_count += 1
+    last_entry_price := close
+
+// Exits
+if strategy.position_size > 0
+    if exit_strategy == "chandelier"
+        strategy.exit("Exit Long", "Long", stop=chandelier_long, limit=close + (full_tp_atr_mult * atr))
+    else
+        initial_stop = strategy.position_avg_price - (stop_loss_atr_mult * atr)
+        strategy.exit("Exit Long", "Long", stop=initial_stop, limit=close + (full_tp_atr_mult * atr))
+
+if strategy.position_size < 0
+    if exit_strategy == "chandelier"
+        strategy.exit("Exit Short", "Short", stop=chandelier_short, limit=close - (full_tp_atr_mult * atr))
+    else
+        initial_stop = strategy.position_avg_price + (stop_loss_atr_mult * atr)
+        strategy.exit("Exit Short", "Short", stop=initial_stop, limit=close - (full_tp_atr_mult * atr))
+
+// Time Exit
+if hour == close_time_hour
+    strategy.close_all("Time Exit 22h")
+    pyramid_count := 0
+    last_entry_price := na
+
+if strategy.position_size == 0
+    pyramid_count := 0
+    last_entry_price := na
+
+// ============================================================================
+// VISUALISIERUNG
+// ============================================================================
+
+plotshape(longCondition, "Long Entry", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(shortCondition, "Short Entry", shape.triangledown, location.abovebar, color.red, size=size.small)
+plot(exit_strategy == "chandelier" and strategy.position_size > 0 ? chandelier_long : na, "Chandelier Stop Long", color.red, linewidth=2)
+plot(exit_strategy == "chandelier" and strategy.position_size < 0 ? chandelier_short : na, "Chandelier Stop Short", color.red, linewidth=2)
+plotshape(pyramid_long, "Pyramid Long", shape.diamond, location.belowbar, color.new(color.green, 50), size=size.tiny)
+plotshape(pyramid_short, "Pyramid Short", shape.diamond, location.abovebar, color.new(color.red, 50), size=size.tiny)
+
+// ROC Alignment Visualisierung
+all_roc_bullish = roc_s > 0 and roc_m > 0 and roc_l > 0
+all_roc_bearish = roc_s < 0 and roc_m < 0 and roc_l < 0
+bgcolor(all_roc_bullish ? color.new(color.green, 97) : all_roc_bearish ? color.new(color.red, 97) : na, title="ROC Alignment")

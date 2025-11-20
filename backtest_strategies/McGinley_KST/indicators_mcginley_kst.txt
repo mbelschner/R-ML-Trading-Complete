@@ -1,0 +1,114 @@
+//@version=5
+indicator("McGinley Dynamic - KST Indikatoren", overlay=false)
+
+// ============================================================================
+// PARAMETER
+// ============================================================================
+
+// McGinley Dynamic Parameter
+md_period = input.int(14, "McGinley Dynamic Period", minval=1)
+
+// KST (Know Sure Thing) Parameter
+kst_roc1 = input.int(6, "KST ROC 1", minval=1)
+kst_roc2 = input.int(9, "KST ROC 2", minval=1)
+kst_roc3 = input.int(12, "KST ROC 3", minval=1)
+kst_roc4 = input.int(18, "KST ROC 4", minval=1)
+
+kst_sma1 = input.int(10, "KST SMA 1", minval=1)
+kst_sma2 = input.int(10, "KST SMA 2", minval=1)
+kst_sma3 = input.int(10, "KST SMA 3", minval=1)
+kst_sma4 = input.int(15, "KST SMA 4", minval=1)
+
+kst_signal_period = input.int(6, "KST Signal Period", minval=1)
+
+// ============================================================================
+// BERECHNUNGEN
+// ============================================================================
+
+// === MCGINLEY DYNAMIC ===
+// Adaptiver Moving Average der sich automatisch an Marktgeschwindigkeit anpasst
+var float md = na
+
+if bar_index < md_period
+    md := na
+else if bar_index == md_period
+    md := ta.sma(close, md_period)
+else
+    // McGinley Formula: MD = MD[1] + (Price - MD[1]) / (N * (Price/MD[1])^4)
+    if md[1] != 0
+        adjustment = (close - md[1]) / (md_period * math.pow(close / md[1], 4))
+        md := md[1] + adjustment
+    else
+        md := close
+
+// === KST (Know Sure Thing) ===
+// Kombiniert mehrere ROC-Perioden mit unterschiedlichen Gewichtungen
+
+// ROC Berechnungen
+roc1 = ta.roc(close, kst_roc1)
+roc2 = ta.roc(close, kst_roc2)
+roc3 = ta.roc(close, kst_roc3)
+roc4 = ta.roc(close, kst_roc4)
+
+// Geglättete ROC-Werte
+rcma1 = ta.sma(roc1, kst_sma1)
+rcma2 = ta.sma(roc2, kst_sma2)
+rcma3 = ta.sma(roc3, kst_sma3)
+rcma4 = ta.sma(roc4, kst_sma4)
+
+// KST = (RCMA1 x 1) + (RCMA2 x 2) + (RCMA3 x 3) + (RCMA4 x 4)
+kst = (rcma1 * 1) + (rcma2 * 2) + (rcma3 * 3) + (rcma4 * 4)
+
+// KST Signal Line
+kst_signal = ta.sma(kst, kst_signal_period)
+
+// === ZUSÄTZLICHE SIGNALE ===
+kst_bullish = kst > 0 and kst > kst_signal and kst > kst[1]
+kst_bearish = kst < 0 and kst < kst_signal and kst < kst[1]
+
+kst_cross_up = ta.crossover(kst, kst_signal)
+kst_cross_down = ta.crossunder(kst, kst_signal)
+
+// ============================================================================
+// PLOTS
+// ============================================================================
+
+// McGinley Dynamic (im separaten Panel als Linie, auf Price skaliert)
+plot(close, "Price (Reference)", color=color.new(color.gray, 80), linewidth=1, display=display.none)
+plot(md, "McGinley Dynamic", color=color.blue, linewidth=2, display=display.none)
+
+// KST und Signal
+plot(kst, "KST", color=color.blue, linewidth=2)
+plot(kst_signal, "KST Signal", color=color.orange, linewidth=2)
+
+// Zero Line
+hline(0, "Zero Line", color=color.gray, linewidth=2)
+
+// KST Histogram (Differenz)
+kst_histogram = kst - kst_signal
+plot(kst_histogram, "KST Histogram", color=kst_histogram > 0 ? color.green : color.red, style=plot.style_histogram, linewidth=2)
+
+// Crossover Signale
+plotshape(kst_cross_up, "Bullish Cross", shape.triangleup, location.bottom, color.green, size=size.small)
+plotshape(kst_cross_down, "Bearish Cross", shape.triangledown, location.top, color.red, size=size.small)
+
+// Hintergrundfarben
+bgcolor(kst > 0 ? color.new(color.green, 95) : color.new(color.red, 95), title="KST Direction")
+bgcolor(kst_bullish ? color.new(color.blue, 98) : kst_bearish ? color.new(color.orange, 98) : na, title="Strong Trend")
+
+// Info Label
+var table info_table = table.new(position.top_right, 2, 4, border_width=1)
+if barstate.islast
+    table.cell(info_table, 0, 0, "KST:", text_color=color.white, bgcolor=color.new(color.blue, 50))
+    table.cell(info_table, 1, 0, str.tostring(kst, "#.##"), text_color=color.white, bgcolor=color.new(color.blue, 70))
+
+    table.cell(info_table, 0, 1, "Signal:", text_color=color.white, bgcolor=color.new(color.orange, 50))
+    table.cell(info_table, 1, 1, str.tostring(kst_signal, "#.##"), text_color=color.white, bgcolor=color.new(color.orange, 70))
+
+    table.cell(info_table, 0, 2, "Diff:", text_color=color.white, bgcolor=color.new(color.gray, 50))
+    table.cell(info_table, 1, 2, str.tostring(kst_histogram, "#.##"), text_color=kst_histogram > 0 ? color.green : color.red, bgcolor=color.new(color.gray, 70))
+
+    table.cell(info_table, 0, 3, "Status:", text_color=color.white, bgcolor=color.new(color.gray, 50))
+    status_text = kst_bullish ? "BULLISH" : kst_bearish ? "BEARISH" : "NEUTRAL"
+    status_color = kst_bullish ? color.green : kst_bearish ? color.red : color.gray
+    table.cell(info_table, 1, 3, status_text, text_color=status_color, bgcolor=color.new(color.gray, 70))

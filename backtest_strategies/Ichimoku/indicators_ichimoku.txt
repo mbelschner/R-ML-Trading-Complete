@@ -1,0 +1,127 @@
+//@version=5
+indicator("Ichimoku Cloud Indikatoren", overlay=true)
+
+// ============================================================================
+// PARAMETER
+// ============================================================================
+
+// Ichimoku Parameter
+tenkan_period = input.int(9, "Tenkan-sen Period (Conversion Line)", minval=1)
+kijun_period = input.int(26, "Kijun-sen Period (Base Line)", minval=1)
+senkou_span_b_period = input.int(52, "Senkou Span B Period", minval=1)
+displacement = input.int(26, "Displacement (Chikou & Cloud)", minval=1)
+
+// Filter Parameter
+use_adx_filter = input.bool(true, "ADX Filter verwenden")
+adx_period = input.int(14, "ADX Period", minval=1)
+adx_threshold = input.float(20, "ADX Threshold", minval=0)
+
+use_rsi_filter = input.bool(true, "RSI Filter verwenden")
+rsi_period = input.int(14, "RSI Period", minval=1)
+rsi_ob = input.float(70, "RSI Overbought", minval=50, maxval=100)
+rsi_os = input.float(30, "RSI Oversold", minval=0, maxval=50)
+
+// ============================================================================
+// BERECHNUNGEN
+// ============================================================================
+
+// === ICHIMOKU CLOUD KOMPONENTEN ===
+
+// Tenkan-sen (Conversion Line) = (9-period high + 9-period low) / 2
+tenkan = (ta.highest(high, tenkan_period) + ta.lowest(low, tenkan_period)) / 2
+
+// Kijun-sen (Base Line) = (26-period high + 26-period low) / 2
+kijun = (ta.highest(high, kijun_period) + ta.lowest(low, kijun_period)) / 2
+
+// Senkou Span A (Leading Span A) = (Tenkan + Kijun) / 2, verschoben um 26 Perioden
+senkou_span_a = (tenkan + kijun) / 2
+
+// Senkou Span B (Leading Span B) = (52-period high + 52-period low) / 2, verschoben um 26 Perioden
+senkou_span_b = (ta.highest(high, senkou_span_b_period) + ta.lowest(low, senkou_span_b_period)) / 2
+
+// Chikou Span (Lagging Span) = Close, verschoben um -26 Perioden
+chikou = close
+
+// === CLOUD (KUMO) ===
+// Die Cloud wird durch Senkou Span A und B gebildet
+cloud_top = math.max(senkou_span_a, senkou_span_b)
+cloud_bottom = math.min(senkou_span_a, senkou_span_b)
+
+// === FILTER INDIKATOREN ===
+
+// ATR
+atr = ta.atr(14)
+
+// ADX
+[diplus, diminus, adx] = ta.dmi(adx_period, adx_period)
+
+// RSI
+rsi = ta.rsi(close, rsi_period)
+
+// === SIGNAL BEDINGUNGEN ===
+
+// Price Position relative zur Cloud
+price_above_cloud = close > cloud_top[displacement]
+price_below_cloud = close < cloud_bottom[displacement]
+price_in_cloud = not price_above_cloud and not price_below_cloud
+
+// Tenkan/Kijun Cross
+tk_cross_bullish = ta.crossover(tenkan, kijun)
+tk_cross_bearish = ta.crossunder(tenkan, kijun)
+
+// Cloud Color
+cloud_bullish = senkou_span_a > senkou_span_b
+cloud_bearish = senkou_span_a < senkou_span_b
+
+// ============================================================================
+// PLOTS
+// ============================================================================
+
+// Ichimoku Linien
+plot(tenkan, "Tenkan-sen (Conversion)", color=color.red, linewidth=2)
+plot(kijun, "Kijun-sen (Base)", color=color.blue, linewidth=2)
+
+// Senkou Spans (verschoben)
+p1 = plot(senkou_span_a[displacement], "Senkou Span A", color=color.green, offset=displacement)
+p2 = plot(senkou_span_b[displacement], "Senkou Span B", color=color.red, offset=displacement)
+
+// Cloud Fill
+fill(p1, p2, color=senkou_span_a > senkou_span_b ? color.new(color.green, 90) : color.new(color.red, 90), title="Kumo (Cloud)")
+
+// Chikou Span (verschoben)
+plot(chikou, "Chikou Span (Lagging)", color=color.purple, linewidth=1, offset=-displacement)
+
+// Signale
+plotshape(tk_cross_bullish and price_above_cloud, "Bullish TK Cross", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(tk_cross_bearish and price_below_cloud, "Bearish TK Cross", shape.triangledown, location.abovebar, color.red, size=size.small)
+
+// Cloud Durchbrüche
+price_breaks_above_cloud = ta.crossover(close, cloud_top[displacement])
+price_breaks_below_cloud = ta.crossunder(close, cloud_bottom[displacement])
+
+plotshape(price_breaks_above_cloud, "Break Above Cloud", shape.circle, location.belowbar, color.new(color.green, 0), size=size.tiny, text="↑")
+plotshape(price_breaks_below_cloud, "Break Below Cloud", shape.circle, location.abovebar, color.new(color.red, 0), size=size.tiny, text="↓")
+
+// Hintergrundfarbe für Price Position
+bgcolor(price_above_cloud ? color.new(color.green, 97) : price_below_cloud ? color.new(color.red, 97) : color.new(color.gray, 97), title="Price vs Cloud")
+
+// Info Table
+var table info_table = table.new(position.top_right, 2, 5, border_width=1)
+if barstate.islast
+    table.cell(info_table, 0, 0, "Tenkan:", text_color=color.white, bgcolor=color.new(color.red, 50))
+    table.cell(info_table, 1, 0, str.tostring(tenkan, "#.##"), text_color=color.white, bgcolor=color.new(color.red, 70))
+
+    table.cell(info_table, 0, 1, "Kijun:", text_color=color.white, bgcolor=color.new(color.blue, 50))
+    table.cell(info_table, 1, 1, str.tostring(kijun, "#.##"), text_color=color.white, bgcolor=color.new(color.blue, 70))
+
+    table.cell(info_table, 0, 2, "Cloud:", text_color=color.white, bgcolor=color.new(color.gray, 50))
+    cloud_status = price_above_cloud ? "ABOVE ↑" : price_below_cloud ? "BELOW ↓" : "INSIDE"
+    cloud_color = price_above_cloud ? color.green : price_below_cloud ? color.red : color.gray
+    table.cell(info_table, 1, 2, cloud_status, text_color=cloud_color, bgcolor=color.new(color.gray, 70))
+
+    table.cell(info_table, 0, 3, "ADX:", text_color=color.white, bgcolor=color.new(color.gray, 50))
+    table.cell(info_table, 1, 3, str.tostring(adx, "#.#"), text_color=adx > adx_threshold ? color.green : color.red, bgcolor=color.new(color.gray, 70))
+
+    table.cell(info_table, 0, 4, "RSI:", text_color=color.white, bgcolor=color.new(color.gray, 50))
+    rsi_color = rsi > rsi_ob ? color.red : rsi < rsi_os ? color.green : color.white
+    table.cell(info_table, 1, 4, str.tostring(rsi, "#.#"), text_color=rsi_color, bgcolor=color.new(color.gray, 70))

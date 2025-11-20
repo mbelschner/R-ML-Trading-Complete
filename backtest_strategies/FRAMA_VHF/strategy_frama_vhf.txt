@@ -1,0 +1,179 @@
+//@version=5
+strategy("FRAMA-VHF Strategie", overlay=true, pyramiding=3, initial_capital=300, default_qty_type=strategy.fixed, default_qty_value=1.2)
+
+// ============================================================================
+// PARAMETER - ENTRY SIGNALS
+// ============================================================================
+
+frama_period = input.int(16, "FRAMA Period", minval=4, group="FRAMA")
+frama_fc = input.int(1, "FRAMA FC", minval=1, group="FRAMA")
+frama_sc = input.int(300, "FRAMA SC", minval=1, group="FRAMA")
+
+vhf_period = input.int(28, "VHF Period", minval=1, group="VHF")
+vhf_threshold = input.float(0.35, "VHF Threshold (Trending)", minval=0, group="VHF")
+
+// ============================================================================
+// PARAMETER - PYRAMIDING
+// ============================================================================
+
+use_pyramiding = input.bool(true, "Pyramiding aktivieren", group="Pyramiding")
+pyramid_method = input.string("breakout", "Pyramiding Methode", options=["breakout", "consecutive"], group="Pyramiding")
+max_pyramid_orders = input.int(3, "Max Pyramid Orders", minval=1, maxval=10, group="Pyramiding")
+pyramid_spacing_atr = input.float(0.5, "Pyramid Spacing (ATR)", minval=0, group="Pyramiding")
+consecutive_bars = input.int(2, "Consecutive Bars", minval=1, group="Pyramiding")
+breakout_lookback = input.int(20, "Breakout Lookback", minval=1, group="Pyramiding")
+
+// ============================================================================
+// PARAMETER - EXITS
+// ============================================================================
+
+exit_strategy = input.string("chandelier", "Exit Strategie", options=["chandelier", "breakeven_trailing"], group="Exit Strategy")
+stop_loss_atr_mult = input.float(3.0, "Initial Stop Loss (ATR)", minval=0, group="Stop Loss")
+chandelier_period = input.int(22, "Chandelier Period", minval=1, group="Chandelier Exit")
+chandelier_multiplier = input.float(3.0, "Chandelier ATR Multiplier", minval=0, group="Chandelier Exit")
+full_tp_atr_mult = input.float(4.5, "Take Profit (ATR)", minval=0, group="Take Profit")
+close_time_hour = input.int(22, "Tägliche Close Time", minval=0, maxval=23, group="Time Management")
+
+// ============================================================================
+// INDIKATOREN BERECHNEN
+// ============================================================================
+
+// ATR
+atr = ta.atr(14)
+
+// === FRAMA ===
+var float frama = na
+
+if bar_index >= frama_period
+    half = math.floor(frama_period / 2)
+    n1_high = ta.highest(high, half)
+    n1_low = ta.lowest(low, half)
+    hl1 = n1_high - n1_low
+    n2_high = ta.highest(high[half], half)
+    n2_low = ta.lowest(low[half], half)
+    hl2 = n2_high - n2_low
+    hl = ta.highest(high, frama_period) - ta.lowest(low, frama_period)
+
+    if hl > 0 and hl1 > 0 and hl2 > 0
+        D = (math.log(hl1 + hl2) - math.log(hl)) / math.log(2)
+        alpha = math.exp(-4.6 * (D - 1))
+        alpha := math.max(2 / (frama_sc + 1), math.min(alpha, 2 / (frama_fc + 1)))
+        frama := alpha * close + (1 - alpha) * nz(frama[1], close)
+    else
+        frama := nz(frama[1], close)
+else
+    frama := close
+
+// === VHF ===
+highest = ta.highest(close, vhf_period)
+lowest = ta.lowest(close, vhf_period)
+sum_changes = math.sum(math.abs(close - close[1]), vhf_period)
+vhf = sum_changes != 0 ? (highest - lowest) / sum_changes : 0
+
+// FRAMA Direction
+frama_rising = frama > frama[1]
+frama_falling = frama < frama[1]
+
+// Chandelier Exit
+chandelier_long = ta.highest(high, chandelier_period) - (chandelier_multiplier * atr)
+chandelier_short = ta.lowest(low, chandelier_period) + (chandelier_multiplier * atr)
+
+// ============================================================================
+// ENTRY BEDINGUNGEN
+// ============================================================================
+
+// Nur traden wenn Markt trending ist
+market_trending = vhf > vhf_threshold
+
+// Long: VHF > threshold + Price crosses above FRAMA + FRAMA rising
+longCondition = market_trending and ta.crossover(close, frama) and frama_rising
+
+// Short: VHF > threshold + Price crosses below FRAMA + FRAMA falling
+shortCondition = market_trending and ta.crossunder(close, frama) and frama_falling
+
+// ============================================================================
+// PYRAMIDING BEDINGUNGEN
+// ============================================================================
+
+var int pyramid_count = 0
+var float last_entry_price = na
+
+breakout_long = use_pyramiding and pyramid_method == "breakout" and strategy.position_size > 0 and high > ta.highest(high[1], breakout_lookback)
+breakout_short = use_pyramiding and pyramid_method == "breakout" and strategy.position_size < 0 and low < ta.lowest(low[1], breakout_lookback)
+
+consecutive_long = use_pyramiding and pyramid_method == "consecutive" and strategy.position_size > 0
+consecutive_short = use_pyramiding and pyramid_method == "consecutive" and strategy.position_size < 0
+for i = 1 to consecutive_bars
+    consecutive_long := consecutive_long and close[i] > close[i+1]
+    consecutive_short := consecutive_short and close[i] < close[i+1]
+
+spacing_ok_long = na(last_entry_price) or close > last_entry_price + (pyramid_spacing_atr * atr)
+spacing_ok_short = na(last_entry_price) or close < last_entry_price - (pyramid_spacing_atr * atr)
+
+pyramid_long = (breakout_long or consecutive_long) and spacing_ok_long and pyramid_count < max_pyramid_orders
+pyramid_short = (breakout_short or consecutive_short) and spacing_ok_short and pyramid_count < max_pyramid_orders
+
+// ============================================================================
+// STRATEGY EXECUTION
+// ============================================================================
+
+// Entry
+if longCondition and strategy.position_size == 0
+    strategy.entry("Long", strategy.long)
+    pyramid_count := 1
+    last_entry_price := close
+
+if shortCondition and strategy.position_size == 0
+    strategy.entry("Short", strategy.short)
+    pyramid_count := 1
+    last_entry_price := close
+
+// Pyramiding
+if pyramid_long
+    strategy.entry("Long", strategy.long)
+    pyramid_count += 1
+    last_entry_price := close
+
+if pyramid_short
+    strategy.entry("Short", strategy.short)
+    pyramid_count += 1
+    last_entry_price := close
+
+// Exits
+if strategy.position_size > 0
+    if exit_strategy == "chandelier"
+        strategy.exit("Exit Long", "Long", stop=chandelier_long, limit=close + (full_tp_atr_mult * atr))
+    else
+        initial_stop = strategy.position_avg_price - (stop_loss_atr_mult * atr)
+        strategy.exit("Exit Long", "Long", stop=initial_stop, limit=close + (full_tp_atr_mult * atr))
+
+if strategy.position_size < 0
+    if exit_strategy == "chandelier"
+        strategy.exit("Exit Short", "Short", stop=chandelier_short, limit=close - (full_tp_atr_mult * atr))
+    else
+        initial_stop = strategy.position_avg_price + (stop_loss_atr_mult * atr)
+        strategy.exit("Exit Short", "Short", stop=initial_stop, limit=close - (full_tp_atr_mult * atr))
+
+// Time Exit
+if hour == close_time_hour
+    strategy.close_all("Time Exit 22h")
+    pyramid_count := 0
+    last_entry_price := na
+
+if strategy.position_size == 0
+    pyramid_count := 0
+    last_entry_price := na
+
+// ============================================================================
+// VISUALISIERUNG
+// ============================================================================
+
+plot(frama, "FRAMA", color=frama_rising ? color.green : color.red, linewidth=3)
+plotshape(longCondition, "Long Entry", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(shortCondition, "Short Entry", shape.triangledown, location.abovebar, color.red, size=size.small)
+plot(exit_strategy == "chandelier" and strategy.position_size > 0 ? chandelier_long : na, "Chandelier Stop Long", color.red, linewidth=2)
+plot(exit_strategy == "chandelier" and strategy.position_size < 0 ? chandelier_short : na, "Chandelier Stop Short", color.red, linewidth=2)
+plotshape(pyramid_long, "Pyramid Long", shape.diamond, location.belowbar, color.new(color.green, 50), size=size.tiny)
+plotshape(pyramid_short, "Pyramid Short", shape.diamond, location.abovebar, color.new(color.red, 50), size=size.tiny)
+
+bgcolor(vhf > vhf_threshold ? color.new(color.green, 97) : color.new(color.red, 97), title="Market Trending")

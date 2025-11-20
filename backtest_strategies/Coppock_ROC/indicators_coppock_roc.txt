@@ -1,0 +1,83 @@
+//@version=5
+indicator("Coppock-ROC Indikatoren", overlay=false)
+
+// ============================================================================
+// PARAMETER
+// ============================================================================
+
+// Coppock Curve Parameter (angepasst für Intraday)
+coppock_roc1 = input.int(7, "Coppock ROC 1 Period", minval=1)
+coppock_roc2 = input.int(10, "Coppock ROC 2 Period", minval=1)
+coppock_wma = input.int(8, "Coppock WMA Period", minval=1)
+
+// Multi-Timeframe ROC Parameter
+roc_short = input.int(3, "ROC Short Period", minval=1)
+roc_medium = input.int(5, "ROC Medium Period", minval=1)
+roc_long = input.int(8, "ROC Long Period", minval=1)
+
+// ============================================================================
+// BERECHNUNGEN
+// ============================================================================
+
+// === COPPOCK CURVE ===
+// Traditionell für monatliche Daten entwickelt, hier angepasst für Intraday
+// Kombiniert zwei ROC-Perioden und glättet mit WMA
+
+// Rate of Change Berechnungen
+roc_1 = ta.roc(close, coppock_roc1)
+roc_2 = ta.roc(close, coppock_roc2)
+
+// Coppock = WMA of (ROC1 + ROC2)
+coppock = ta.wma(roc_1 + roc_2, coppock_wma)
+
+// === MULTI-TIMEFRAME ROC ALIGNMENT ===
+// Verschiedene ROC-Perioden zur Bestätigung des Trends
+roc_s = ta.roc(close, roc_short)
+roc_m = ta.roc(close, roc_medium)
+roc_l = ta.roc(close, roc_long)
+
+// ROC Alignment Check
+all_roc_positive = roc_s > 0 and roc_m > 0 and roc_l > 0
+all_roc_negative = roc_s < 0 and roc_m < 0 and roc_l < 0
+
+// ============================================================================
+// PLOTS
+// ============================================================================
+
+// Coppock Curve
+plot(coppock, "Coppock Curve", color=color.blue, linewidth=3)
+hline(0, "Zero Line", color=color.gray, linewidth=2)
+
+// Positive/Negative Zonen
+bgcolor(coppock > 0 ? color.new(color.green, 95) : color.new(color.red, 95), title="Coppock Direction")
+
+// Coppock Trendwechsel markieren
+coppock_turn_positive = ta.cross(coppock, 0) and coppock > 0
+coppock_turn_negative = ta.cross(coppock, 0) and coppock < 0
+plotshape(coppock_turn_positive, "Bullish Turn", shape.triangleup, location.bottom, color.green, size=size.small)
+plotshape(coppock_turn_negative, "Bearish Turn", shape.triangledown, location.top, color.red, size=size.small)
+
+// Multi-ROC Plots
+plot(roc_s, "ROC Short", color=color.new(color.green, 0), linewidth=1)
+plot(roc_m, "ROC Medium", color=color.new(color.orange, 0), linewidth=1)
+plot(roc_l, "ROC Long", color=color.new(color.red, 0), linewidth=1)
+
+// ROC Alignment Indikator
+plot(all_roc_positive ? 10 : all_roc_negative ? -10 : 0, "ROC Alignment", color=all_roc_positive ? color.green : all_roc_negative ? color.red : color.gray, linewidth=2, style=plot.style_histogram)
+
+// ROC Zero Line
+hline(0, "ROC Zero", color=color.gray, linestyle=hline.style_dotted)
+
+// Informations-Label
+var label info_label = na
+if barstate.islast
+    info_text = "Coppock: " + str.tostring(coppock, "#.##") + "\n"
+    info_text += "ROC-S: " + str.tostring(roc_s, "#.##") + " | "
+    info_text += "ROC-M: " + str.tostring(roc_m, "#.##") + " | "
+    info_text += "ROC-L: " + str.tostring(roc_l, "#.##")
+
+    if na(info_label)
+        info_label := label.new(bar_index, coppock, info_text, style=label.style_label_left, color=color.new(color.blue, 80), textcolor=color.white, size=size.small)
+    else
+        label.set_xy(info_label, bar_index, coppock)
+        label.set_text(info_label, info_text)

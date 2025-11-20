@@ -1,0 +1,101 @@
+//@version=5
+indicator("Fisher Transform Indikator", overlay=false)
+
+// ============================================================================
+// PARAMETER
+// ============================================================================
+
+fisher_period = input.int(10, "Fisher Transform Period", minval=1)
+
+// ============================================================================
+// BERECHNUNGEN
+// ============================================================================
+
+// === EHLERS FISHER TRANSFORM ===
+// Der Fisher Transform konvertiert Preise in eine Gauß'sche Normalverteilung
+// Dadurch werden Wendepunkte klarer und früher erkennbar
+
+// Schritt 1: Median Price berechnen
+median_price = (high + low) / 2
+
+// Schritt 2: Normalisierung auf -1 bis +1 Range
+max_med = ta.highest(median_price, fisher_period)
+min_med = ta.lowest(median_price, fisher_period)
+
+// Value zwischen -1 und +1
+raw_value = max_med != min_med ? 2 * ((median_price - min_med) / (max_med - min_med)) - 1 : 0
+
+// Limitierung auf -0.999 bis +0.999 (log-Fehler vermeiden)
+value = math.max(-0.999, math.min(0.999, raw_value))
+
+// Schritt 3: Fisher Transform anwenden
+var float fisher = 0.0
+fisher := 0.5 * math.log((1 + value) / (1 - value)) + 0.5 * nz(fisher[1])
+
+// Schritt 4: Signal Line (gelaggter Fisher)
+fisher_signal = fisher[1]
+
+// ============================================================================
+// ZUSÄTZLICHE INDIKATOREN
+// ============================================================================
+
+// Crossover/Crossunder Detection
+bullish_cross = ta.crossover(fisher, fisher_signal)
+bearish_cross = ta.crossunder(fisher, fisher_signal)
+
+// Momentum des Fisher
+fisher_momentum = fisher - fisher[1]
+
+// Divergence Helper (optional)
+price_higher_high = high > high[5] and high[5] > high[10]
+price_lower_low = low < low[5] and low[5] < low[10]
+fisher_lower_high = fisher < fisher[5] and fisher[5] < fisher[10]
+fisher_higher_low = fisher > fisher[5] and fisher[5] > fisher[10]
+
+bearish_divergence = price_higher_high and fisher_lower_high
+bullish_divergence = price_lower_low and fisher_higher_low
+
+// ============================================================================
+// PLOTS
+// ============================================================================
+
+// Fisher Transform und Signal Line
+plot(fisher, "Fisher Transform", color=color.blue, linewidth=3)
+plot(fisher_signal, "Fisher Signal", color=color.orange, linewidth=2, style=plot.style_line)
+
+// Zero Line
+hline(0, "Zero Line", color=color.gray, linewidth=2)
+
+// Extreme Levels
+hline(2, "Overbought Extreme", color=color.red, linestyle=hline.style_dashed)
+hline(-2, "Oversold Extreme", color=color.green, linestyle=hline.style_dashed)
+hline(1.5, "Overbought Warning", color=color.new(color.red, 50), linestyle=hline.style_dotted)
+hline(-1.5, "Oversold Warning", color=color.new(color.green, 50), linestyle=hline.style_dotted)
+
+// Crossover Signale
+plotshape(bullish_cross, "Bullish Cross", shape.triangleup, location.bottom, color.green, size=size.small)
+plotshape(bearish_cross, "Bearish Cross", shape.triangledown, location.top, color.red, size=size.small)
+
+// Divergenzen
+plotshape(bullish_divergence, "Bullish Div", shape.circle, location.bottom, color.new(color.green, 0), size=size.tiny, text="BD")
+plotshape(bearish_divergence, "Bearish Div", shape.circle, location.top, color.new(color.red, 0), size=size.tiny, text="BD")
+
+// Hintergrundfarben
+bgcolor(fisher > 2 ? color.new(color.red, 90) : fisher < -2 ? color.new(color.green, 90) : na, title="Extreme Zones")
+bgcolor(fisher > fisher_signal ? color.new(color.blue, 98) : color.new(color.orange, 98), title="Trend Direction")
+
+// Momentum Histogram
+plot(fisher_momentum * 5, "Fisher Momentum (x5)", color=fisher_momentum > 0 ? color.green : color.red, style=plot.style_histogram, linewidth=2, display=display.none)
+
+// Info Label
+var label info_label = na
+if barstate.islast
+    info_text = "Fisher: " + str.tostring(fisher, "#.###") + "\n"
+    info_text += "Signal: " + str.tostring(fisher_signal, "#.###") + "\n"
+    info_text += "Diff: " + str.tostring(fisher - fisher_signal, "#.###")
+
+    if na(info_label)
+        info_label := label.new(bar_index, fisher, info_text, style=label.style_label_left, color=color.new(color.blue, 80), textcolor=color.white, size=size.small)
+    else
+        label.set_xy(info_label, bar_index, fisher)
+        label.set_text(info_label, info_text)
