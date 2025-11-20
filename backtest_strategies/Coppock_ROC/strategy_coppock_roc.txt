@@ -1,5 +1,5 @@
 //@version=5
-strategy("Coppock-ROC Strategie", overlay=true, pyramiding=3, initial_capital=300, default_qty_type=strategy.fixed, default_qty_value=1.2)
+strategy("Coppock-ROC Strategie", overlay=true, pyramiding=3, initial_capital=300, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.cash_per_contract, commission_value=0.35)
 
 // ============================================================================
 // PARAMETER - ENTRY SIGNALS
@@ -21,6 +21,7 @@ use_pyramiding = input.bool(true, "Pyramiding aktivieren", group="Pyramiding")
 pyramid_method = input.string("breakout", "Pyramiding Methode", options=["breakout", "consecutive"], group="Pyramiding")
 max_pyramid_orders = input.int(3, "Max Pyramid Orders", minval=1, maxval=10, group="Pyramiding")
 pyramid_spacing_atr = input.float(0.5, "Pyramid Spacing (ATR)", minval=0, group="Pyramiding")
+pyramid_size_multiplier = input.float(0.5, "Pyramid Size Multiplier", minval=0.1, maxval=1, group="Pyramiding")
 consecutive_bars = input.int(2, "Consecutive Bars", minval=1, group="Pyramiding")
 breakout_lookback = input.int(20, "Breakout Lookback", minval=1, group="Pyramiding")
 
@@ -29,11 +30,31 @@ breakout_lookback = input.int(20, "Breakout Lookback", minval=1, group="Pyramidi
 // ============================================================================
 
 exit_strategy = input.string("chandelier", "Exit Strategie", options=["chandelier", "breakeven_trailing"], group="Exit Strategy")
+
+// Stop Loss
 stop_loss_atr_mult = input.float(3.0, "Initial Stop Loss (ATR)", minval=0, group="Stop Loss")
+
+// Chandelier Exit
 chandelier_period = input.int(22, "Chandelier Period", minval=1, group="Chandelier Exit")
 chandelier_multiplier = input.float(3.0, "Chandelier ATR Multiplier", minval=0, group="Chandelier Exit")
-full_tp_atr_mult = input.float(4.5, "Take Profit (ATR)", minval=0, group="Take Profit")
-close_time_hour = input.int(22, "Tägliche Close Time", minval=0, maxval=23, group="Time Management")
+
+// Breakeven + Trailing
+breakeven_trigger_atr = input.float(1.5, "Breakeven Trigger (ATR)", minval=0, group="Breakeven & Trailing")
+breakeven_offset_atr = input.float(0.2, "Breakeven Offset (ATR)", minval=0, group="Breakeven & Trailing")
+trailing_stop_atr_mult = input.float(2.0, "Trailing Stop (ATR)", minval=0, group="Breakeven & Trailing")
+trailing_start_atr_mult = input.float(1.5, "Trailing Start (zusätzlich zu Breakeven)", minval=0, group="Breakeven & Trailing")
+
+// Take Profit
+tp_strategy = input.string("partial", "Take Profit Strategie", options=["full", "partial"], group="Take Profit")
+full_tp_atr_mult = input.float(4.5, "Full TP (ATR)", minval=0, group="Take Profit")
+partial_tp_1_atr = input.float(2.0, "Partial TP Level 1 (ATR)", minval=0, group="Take Profit")
+partial_tp_1_size = input.float(0.33, "Partial TP Level 1 Size (33%)", minval=0, maxval=1, group="Take Profit")
+partial_tp_2_atr = input.float(3.5, "Partial TP Level 2 (ATR)", minval=0, group="Take Profit")
+partial_tp_2_size = input.float(0.33, "Partial TP Level 2 Size (33%)", minval=0, maxval=1, group="Take Profit")
+
+// Time Exit
+close_time_hour = input.int(22, "Tägliche Close Time (Stunde)", minval=0, maxval=23, group="Time Management")
+max_bars_in_trade = input.int(100, "Max Bars in Trade", minval=1, group="Time Management")
 
 // ============================================================================
 // INDIKATOREN BERECHNEN
@@ -73,6 +94,8 @@ shortCondition = coppock_prev > 0 and coppock < 0 and roc_s < 0 and roc_m < 0 an
 
 var int pyramid_count = 0
 var float last_entry_price = na
+var int entry_bar = 0
+var float total_position_size = 0.0
 
 breakout_long = use_pyramiding and pyramid_method == "breakout" and strategy.position_size > 0 and high > ta.highest(high[1], breakout_lookback)
 breakout_short = use_pyramiding and pyramid_method == "breakout" and strategy.position_size < 0 and low < ta.lowest(low[1], breakout_lookback)
@@ -90,66 +113,219 @@ pyramid_long = (breakout_long or consecutive_long) and spacing_ok_long and pyram
 pyramid_short = (breakout_short or consecutive_short) and spacing_ok_short and pyramid_count < max_pyramid_orders
 
 // ============================================================================
+// PARTIAL TAKE PROFIT TRACKING
+// ============================================================================
+
+var bool partial_tp_1_done = false
+var bool partial_tp_2_done = false
+var float highest_price = na
+var float lowest_price = na
+
+// ============================================================================
+// EXIT BEDINGUNGEN
+// ============================================================================
+
+// Time Exit
+time_exit = hour == close_time_hour
+
+// Max Bars Exit
+bars_in_trade = bar_index - entry_bar
+max_bars_exit = bars_in_trade >= max_bars_in_trade and strategy.position_size != 0
+
+// ============================================================================
 // STRATEGY EXECUTION
 // ============================================================================
 
 // Entry
 if longCondition and strategy.position_size == 0
-    strategy.entry("Long", strategy.long)
+    strategy.entry("Long", strategy.long, qty=1.0)
     pyramid_count := 1
     last_entry_price := close
+    entry_bar := bar_index
+    total_position_size := 1.0
+    partial_tp_1_done := false
+    partial_tp_2_done := false
+    highest_price := high
 
 if shortCondition and strategy.position_size == 0
-    strategy.entry("Short", strategy.short)
+    strategy.entry("Short", strategy.short, qty=1.0)
     pyramid_count := 1
     last_entry_price := close
+    entry_bar := bar_index
+    total_position_size := 1.0
+    partial_tp_1_done := false
+    partial_tp_2_done := false
+    lowest_price := low
 
 // Pyramiding
 if pyramid_long
-    strategy.entry("Long", strategy.long)
+    qty = pyramid_size_multiplier
+    strategy.entry("Long", strategy.long, qty=qty)
     pyramid_count += 1
     last_entry_price := close
 
 if pyramid_short
-    strategy.entry("Short", strategy.short)
+    qty = pyramid_size_multiplier
+    strategy.entry("Short", strategy.short, qty=qty)
     pyramid_count += 1
     last_entry_price := close
 
-// Exits
+// ============================================================================
+// POSITION MANAGEMENT & EXITS
+// ============================================================================
+
+// Update Highest/Lowest Price
 if strategy.position_size > 0
-    if exit_strategy == "chandelier"
-        strategy.exit("Exit Long", "Long", stop=chandelier_long, limit=close + (full_tp_atr_mult * atr))
-    else
-        initial_stop = strategy.position_avg_price - (stop_loss_atr_mult * atr)
-        strategy.exit("Exit Long", "Long", stop=initial_stop, limit=close + (full_tp_atr_mult * atr))
+    highest_price := na(highest_price) ? high : math.max(highest_price, high)
 
 if strategy.position_size < 0
-    if exit_strategy == "chandelier"
-        strategy.exit("Exit Short", "Short", stop=chandelier_short, limit=close - (full_tp_atr_mult * atr))
-    else
-        initial_stop = strategy.position_avg_price + (stop_loss_atr_mult * atr)
-        strategy.exit("Exit Short", "Short", stop=initial_stop, limit=close - (full_tp_atr_mult * atr))
+    lowest_price := na(lowest_price) ? low : math.min(lowest_price, low)
 
-// Time Exit
-if hour == close_time_hour
-    strategy.close_all("Time Exit 22h")
+// PARTIAL TAKE PROFIT für LONG
+if strategy.position_size > 0 and tp_strategy == "partial"
+    current_profit = highest_price - strategy.position_avg_price
+
+    // Level 1 Partial TP
+    if not partial_tp_1_done and current_profit >= partial_tp_1_atr * atr
+        close_qty = strategy.position_size * partial_tp_1_size
+        strategy.close("Long", qty=close_qty, comment="Partial TP 1")
+        partial_tp_1_done := true
+
+    // Level 2 Partial TP
+    if not partial_tp_2_done and current_profit >= partial_tp_2_atr * atr
+        close_qty = strategy.position_size * partial_tp_2_size
+        strategy.close("Long", qty=close_qty, comment="Partial TP 2")
+        partial_tp_2_done := true
+
+// PARTIAL TAKE PROFIT für SHORT
+if strategy.position_size < 0 and tp_strategy == "partial"
+    current_profit = strategy.position_avg_price - lowest_price
+
+    // Level 1 Partial TP
+    if not partial_tp_1_done and current_profit >= partial_tp_1_atr * atr
+        close_qty = math.abs(strategy.position_size) * partial_tp_1_size
+        strategy.close("Short", qty=close_qty, comment="Partial TP 1")
+        partial_tp_1_done := true
+
+    // Level 2 Partial TP
+    if not partial_tp_2_done and current_profit >= partial_tp_2_atr * atr
+        close_qty = math.abs(strategy.position_size) * partial_tp_2_size
+        strategy.close("Short", qty=close_qty, comment="Partial TP 2")
+        partial_tp_2_done := true
+
+// EXITS - LONG
+if strategy.position_size > 0
+    if exit_strategy == "chandelier"
+        // Chandelier Exit
+        if tp_strategy == "full"
+            strategy.exit("Exit Long", "Long", stop=chandelier_long, limit=strategy.position_avg_price + (full_tp_atr_mult * atr))
+        else
+            // Partial: Finaler TP am höchsten Level
+            final_tp = strategy.position_avg_price + (math.max(partial_tp_2_atr, full_tp_atr_mult) * atr)
+            // Nach 1. Partial TP: SL auf Breakeven
+            stop_level = partial_tp_1_done ? math.max(chandelier_long, strategy.position_avg_price + (breakeven_offset_atr * atr)) : chandelier_long
+            strategy.exit("Exit Long", "Long", stop=stop_level, limit=final_tp)
+
+    else if exit_strategy == "breakeven_trailing"
+        // Breakeven + Trailing Stop
+        var float long_stop = strategy.position_avg_price - (stop_loss_atr_mult * atr)
+        current_profit = highest_price - strategy.position_avg_price
+
+        // Phase 1: Breakeven
+        if current_profit >= breakeven_trigger_atr * atr
+            long_stop := math.max(long_stop, strategy.position_avg_price + (breakeven_offset_atr * atr))
+
+            // Phase 2: Trailing (startet nach Breakeven + trailing_start_atr_mult)
+            if current_profit >= (breakeven_trigger_atr + trailing_start_atr_mult) * atr
+                trailing_stop = highest_price - (trailing_stop_atr_mult * atr)
+                long_stop := math.max(long_stop, trailing_stop)
+
+        if tp_strategy == "full"
+            strategy.exit("Exit Long", "Long", stop=long_stop, limit=strategy.position_avg_price + (full_tp_atr_mult * atr))
+        else
+            final_tp = strategy.position_avg_price + (math.max(partial_tp_2_atr, full_tp_atr_mult) * atr)
+            strategy.exit("Exit Long", "Long", stop=long_stop, limit=final_tp)
+
+// EXITS - SHORT
+if strategy.position_size < 0
+    if exit_strategy == "chandelier"
+        // Chandelier Exit
+        if tp_strategy == "full"
+            strategy.exit("Exit Short", "Short", stop=chandelier_short, limit=strategy.position_avg_price - (full_tp_atr_mult * atr))
+        else
+            // Partial: Finaler TP am höchsten Level
+            final_tp = strategy.position_avg_price - (math.max(partial_tp_2_atr, full_tp_atr_mult) * atr)
+            // Nach 1. Partial TP: SL auf Breakeven
+            stop_level = partial_tp_1_done ? math.min(chandelier_short, strategy.position_avg_price - (breakeven_offset_atr * atr)) : chandelier_short
+            strategy.exit("Exit Short", "Short", stop=stop_level, limit=final_tp)
+
+    else if exit_strategy == "breakeven_trailing"
+        // Breakeven + Trailing Stop
+        var float short_stop = strategy.position_avg_price + (stop_loss_atr_mult * atr)
+        current_profit = strategy.position_avg_price - lowest_price
+
+        // Phase 1: Breakeven
+        if current_profit >= breakeven_trigger_atr * atr
+            short_stop := math.min(short_stop, strategy.position_avg_price - (breakeven_offset_atr * atr))
+
+            // Phase 2: Trailing
+            if current_profit >= (breakeven_trigger_atr + trailing_start_atr_mult) * atr
+                trailing_stop = lowest_price + (trailing_stop_atr_mult * atr)
+                short_stop := math.min(short_stop, trailing_stop)
+
+        if tp_strategy == "full"
+            strategy.exit("Exit Short", "Short", stop=short_stop, limit=strategy.position_avg_price - (full_tp_atr_mult * atr))
+        else
+            final_tp = strategy.position_avg_price - (math.max(partial_tp_2_atr, full_tp_atr_mult) * atr)
+            strategy.exit("Exit Short", "Short", stop=short_stop, limit=final_tp)
+
+// Time Exit (22:00)
+if time_exit or max_bars_exit
+    strategy.close_all(time_exit ? "Time Exit 22h" : "Max Bars Exit")
     pyramid_count := 0
     last_entry_price := na
+    entry_bar := 0
+    total_position_size := 0.0
+    partial_tp_1_done := false
+    partial_tp_2_done := false
+    highest_price := na
+    lowest_price := na
 
+// Reset bei Position Close
 if strategy.position_size == 0
     pyramid_count := 0
     last_entry_price := na
+    entry_bar := 0
+    total_position_size := 0.0
+    partial_tp_1_done := false
+    partial_tp_2_done := false
+    highest_price := na
+    lowest_price := na
 
 // ============================================================================
 // VISUALISIERUNG
 // ============================================================================
 
+// Entry Signale
 plotshape(longCondition, "Long Entry", shape.triangleup, location.belowbar, color.green, size=size.small)
 plotshape(shortCondition, "Short Entry", shape.triangledown, location.abovebar, color.red, size=size.small)
-plot(exit_strategy == "chandelier" and strategy.position_size > 0 ? chandelier_long : na, "Chandelier Stop Long", color.red, linewidth=2)
-plot(exit_strategy == "chandelier" and strategy.position_size < 0 ? chandelier_short : na, "Chandelier Stop Short", color.red, linewidth=2)
+
+// Chandelier Exit Lines
+plot(exit_strategy == "chandelier" and strategy.position_size > 0 ? chandelier_long : na, "Chandelier Stop Long", color.red, linewidth=2, style=plot.style_linebr)
+plot(exit_strategy == "chandelier" and strategy.position_size < 0 ? chandelier_short : na, "Chandelier Stop Short", color.red, linewidth=2, style=plot.style_linebr)
+
+// Pyramiding Signale
 plotshape(pyramid_long, "Pyramid Long", shape.diamond, location.belowbar, color.new(color.green, 50), size=size.tiny)
 plotshape(pyramid_short, "Pyramid Short", shape.diamond, location.abovebar, color.new(color.red, 50), size=size.tiny)
+
+// Partial TP Levels
+if strategy.position_size > 0 and tp_strategy == "partial"
+    line.new(bar_index, strategy.position_avg_price + (partial_tp_1_atr * atr), bar_index + 1, strategy.position_avg_price + (partial_tp_1_atr * atr), color=color.new(color.orange, 50), width=1, style=line.style_dashed)
+    line.new(bar_index, strategy.position_avg_price + (partial_tp_2_atr * atr), bar_index + 1, strategy.position_avg_price + (partial_tp_2_atr * atr), color=color.new(color.yellow, 50), width=1, style=line.style_dashed)
+
+if strategy.position_size < 0 and tp_strategy == "partial"
+    line.new(bar_index, strategy.position_avg_price - (partial_tp_1_atr * atr), bar_index + 1, strategy.position_avg_price - (partial_tp_1_atr * atr), color=color.new(color.orange, 50), width=1, style=line.style_dashed)
+    line.new(bar_index, strategy.position_avg_price - (partial_tp_2_atr * atr), bar_index + 1, strategy.position_avg_price - (partial_tp_2_atr * atr), color=color.new(color.yellow, 50), width=1, style=line.style_dashed)
 
 // ROC Alignment Visualisierung
 all_roc_bullish = roc_s > 0 and roc_m > 0 and roc_l > 0
