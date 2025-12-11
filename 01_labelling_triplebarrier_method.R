@@ -1,5 +1,5 @@
 # ==============================================================================
-# FINANCIAL TIME SERIES LABELING: Triple Barrier & Trend Scanning
+# FINANCIAL TIME SERIES LABELING: Triple Barrier Method (Directional)
 # ==============================================================================
 
 rm(list=ls())
@@ -9,10 +9,9 @@ options(scipen=999)
 # Pakete laden -----------------------------------------------------------------
 
 pacman::p_load(tidyverse,
-               zoo,
-               scales, 
-               gridExtra,
-               TTR)
+               data.table,
+               TTR,
+               tictoc)
 
 # Daten laden ------------------------------------------------------------------
 input_path <- file.path("C:/Users/maxib/OneDrive/Dokumente/Finance/capitalcom_backtesting", "api-data")
@@ -22,9 +21,9 @@ EPIC = "GOLD"
 INTERVAL = "MINUTE_15"
 
 filename = paste0(EPIC, "_", INTERVAL, ".csv")
-output_file_name = paste0("triplebarrier_labelled_", EPIC, "_", INTERVAL, ".csv")
+directional_name = paste0("directional_labelled_", filename)
+name_aggressive_labelling = paste0("aggressive_strat_", filename)
 
-# Daten laden und vorbereiten
 # Daten laden und vorbereiten
 df_raw <- read_csv(file.path(input_path, filename)) %>%
   mutate(time = as.POSIXct(time, format="%Y-%m-%d %H:%M:%S")) %>%
@@ -38,317 +37,473 @@ df_raw <- read_csv(file.path(input_path, filename)) %>%
     log_close = log(close)
   )
 
+# Für Test: nur 3 Monate
+df_test = df_raw #%>%
+  #filter(time >= as.Date("2025-07-01") & time <= as.Date("2025-10-30"))
+
 # ==============================================================================
-# 1. SYMMETRISCHE TRIPLE BARRIER METHOD
+# 1. SYMMETRISCHE TRIPLE BARRIER METHOD (DIRECTIONAL)
+# ==============================================================================
+# Diese Methode erzeugt 3 Labels:
+#   1  = Long ist profitabel (TP vor SL erreicht)
+#  -1  = Short ist profitabel (TP vor SL erreicht)
+#   0  = Beide unprofitabel (SL vor TP erreicht oder Time Barrier)
+#
+# Bei beiden profitabel: Die SCHNELLERE Richtung gewinnt
 # ==============================================================================
 
-triple_barrier_labeling <- function(data, 
-                                    atr_multiplier = 3,        # 3x ATR für beide Barriers
-                                    close_time = "22:30",      # Tägliche Schlusszeit
-                                    atr_period = 14) {         # ATR Periode
+create_directional_labels <- function(prices,
+                                      risk_reward_ratio = 2.0,
+                                      atr_period = 14,
+                                      atr_mult_sl = 2,
+                                      max_horizon = 24) {
   
-  # Berechne ATR mit TTR Package (auf normalen Preisen)
-  atr_data <- ATR(data[, c("high", "low", "close")], n = atr_period)
-  atr <- atr_data[, "atr"]
+  # Data.table für Performance
+  dt <- data.table(prices)
   
-  n <- nrow(data)
-  labels <- rep(NA, n)
-  barrier_touched <- rep(NA, n)
-  bars_held <- rep(NA, n)
-  returns <- rep(NA, n)
-  log_returns <- rep(NA, n)  # Neue Spalte für log returns
-  entry_time_char <- rep(NA, n)
-  exit_time_char <- rep(NA, n)
-  barrier_distances <- rep(NA, n)
-  upper_barriers <- rep(NA, n)
-  lower_barriers <- rep(NA, n)
-  upper_barriers_log <- rep(NA, n)  # Log Barriers
-  lower_barriers_log <- rep(NA, n)  # Log Barriers
+  # ATR berechnen (Average True Range für dynamische Barrieren)
+  dt[, atr := ATR(cbind(high, low, close), n = atr_period)[, "atr"]]
   
-  # Konvertiere close_time zu time object für Vergleich
-  close_hour <- as.numeric(substr(close_time, 1, 2))
-  close_minute <- as.numeric(substr(close_time, 4, 5))
+  # Log-Preis für bessere statistische Eigenschaften
+  dt[, log_price := log(close)]
   
-  for (i in 1:(n - 1)) {
-    # Überspringe wenn ATR noch nicht berechnet werden kann
-    if (is.na(atr[i]) || atr[i] == 0) {
-      next
-    }
+  # Take-Profit Multiplikator basierend auf Risk-Reward Ratio
+  atr_mult_tp <- atr_mult_sl * risk_reward_ratio
+  
+  # Label-Spalten initialisieren
+  dt[, label := NA_integer_]
+  dt[, exit_reason := NA_character_]
+  
+  # Für jeden möglichen Entry-Punkt
+  for(i in 1:(nrow(dt) - max_horizon)) {
     
-    entry_price <- data$close[i]
-    entry_log_price <- data$log_close[i]
-    entry_datetime <- data$time[i]
-    entry_time_char[i] <- format(entry_datetime, "%Y-%m-%d %H:%M:%S")
+    if(is.na(dt$atr[i])) next
     
-    # SYMMETRISCH: Beide Barriers basieren auf ATR
-    # Upper Barrier: Entry + 3x ATR (Profit für Long)
-    # Lower Barrier: Entry - 3x ATR (Profit für Short)
-    barrier_distance <- atr_multiplier * atr[i]
+    entry_price <- dt$log_price[i]
+    atr_val <- dt$atr[i]
+    price_val <- dt$close[i]
     
-    upper_barrier <- entry_price + barrier_distance
-    lower_barrier <- entry_price - barrier_distance
+    # LONG Barrieren (symmetrisch)
+    # TP: Preis steigt um atr_mult_tp * ATR
+    # SL: Preis fällt um atr_mult_sl * ATR
+    long_tp <- entry_price + (atr_mult_tp * atr_val / price_val)
+    long_sl <- entry_price - (atr_mult_sl * atr_val / price_val)
     
-    # Log-Barriers berechnen
-    upper_barrier_log <- log(upper_barrier)
-    lower_barrier_log <- log(lower_barrier)
+    # SHORT Barrieren (symmetrisch)
+    # TP: Preis fällt um atr_mult_tp * ATR
+    # SL: Preis steigt um atr_mult_sl * ATR
+    short_tp <- entry_price - (atr_mult_tp * atr_val / price_val)
+    short_sl <- entry_price + (atr_mult_sl * atr_val / price_val)
     
-    # Speichere die Barrier-Werte
-    barrier_distances[i] <- barrier_distance
-    upper_barriers[i] <- upper_barrier
-    lower_barriers[i] <- lower_barrier
-    upper_barriers_log[i] <- upper_barrier_log
-    lower_barriers_log[i] <- lower_barrier_log
+    # Zukünftige Preise betrachten (bis max_horizon)
+    future_idx <- (i+1):min(i + max_horizon, nrow(dt))
+    future_log_prices <- dt$log_price[future_idx]
     
-    # Finde den nächsten 22:30 Zeitpunkt
-    entry_date <- as.Date(entry_datetime)
-    close_datetime <- as.POSIXct(paste(entry_date, close_time), tz = attr(entry_datetime, "tzone"))
+    # ==================================================
+    # LONG: Prüfe ob TP vor SL erreicht wird
+    # ==================================================
+    long_tp_touch <- which(future_log_prices >= long_tp)
+    long_sl_touch <- which(future_log_prices <= long_sl)
     
-    # Wenn Entry nach 22:30 ist, nimm 22:30 vom nächsten Tag
-    if (entry_datetime >= close_datetime) {
-      close_datetime <- close_datetime + days(1)
-    }
+    long_profitable <- FALSE
+    long_bars <- Inf
     
-    # Finde alle zukünftigen Zeitpunkte bis zur Schlusszeit
-    future_indices <- which(data$time > entry_datetime & data$time <= close_datetime)
-    
-    if (length(future_indices) == 0) {
-      # Keine zukünftigen Daten verfügbar
-      next
-    }
-    
-    future_highs <- data$high[future_indices]
-    future_lows <- data$low[future_indices]
-    future_times <- data$time[future_indices]
-    
-    # Finde welche Barrier zuerst getroffen wird
-    upper_touch <- which(future_highs >= upper_barrier)
-    lower_touch <- which(future_lows <= lower_barrier)
-    
-    if (length(upper_touch) > 0 && length(lower_touch) > 0) {
-      # Beide Barriers getroffen - welche zuerst?
-      if (upper_touch[1] < lower_touch[1]) {
-        labels[i] <- 1  # Upper Barrier zuerst (Long gewinnt)
-        barrier_touched[i] <- "upper"
-        bars_held[i] <- upper_touch[1]
-        returns[i] <- barrier_distance / entry_price
-        log_returns[i] <- upper_barrier_log - entry_log_price  # Log Return
-        exit_time_char[i] <- format(future_times[upper_touch[1]], "%Y-%m-%d %H:%M:%S")
-      } else {
-        labels[i] <- -1  # Lower Barrier zuerst (Short gewinnt)
-        barrier_touched[i] <- "lower"
-        bars_held[i] <- lower_touch[1]
-        returns[i] <- -barrier_distance / entry_price
-        log_returns[i] <- lower_barrier_log - entry_log_price  # Log Return (negativ)
-        exit_time_char[i] <- format(future_times[lower_touch[1]], "%Y-%m-%d %H:%M:%S")
+    if(length(long_tp_touch) > 0 & length(long_sl_touch) > 0) {
+      # Beide Barrieren werden berührt - welche zuerst?
+      if(long_tp_touch[1] < long_sl_touch[1]) {
+        long_profitable <- TRUE
+        long_bars <- long_tp_touch[1]
       }
-    } else if (length(upper_touch) > 0) {
-      labels[i] <- 1  # Nur Upper Barrier getroffen (Long gewinnt)
-      barrier_touched[i] <- "upper"
-      bars_held[i] <- upper_touch[1]
-      returns[i] <- barrier_distance / entry_price
-      log_returns[i] <- upper_barrier_log - entry_log_price
-      exit_time_char[i] <- format(future_times[upper_touch[1]], "%Y-%m-%d %H:%M:%S")
-    } else if (length(lower_touch) > 0) {
-      labels[i] <- -1  # Nur Lower Barrier getroffen (Short gewinnt)
-      barrier_touched[i] <- "lower"
-      bars_held[i] <- lower_touch[1]
-      returns[i] <- -barrier_distance / entry_price
-      log_returns[i] <- lower_barrier_log - entry_log_price
-      exit_time_char[i] <- format(future_times[lower_touch[1]], "%Y-%m-%d %H:%M:%S")
-    } else {
-      # Time Barrier (22:30 erreicht)
-      labels[i] <- 0
-      barrier_touched[i] <- "time_2230"
-      bars_held[i] <- length(future_indices)
+    } else if(length(long_tp_touch) > 0) {
+      # Nur TP berührt, kein SL
+      long_profitable <- TRUE
+      long_bars <- long_tp_touch[1]
+    }
+    
+    # ==================================================
+    # SHORT: Prüfe ob TP vor SL erreicht wird
+    # ==================================================
+    short_tp_touch <- which(future_log_prices <= short_tp)
+    short_sl_touch <- which(future_log_prices >= short_sl)
+    
+    short_profitable <- FALSE
+    short_bars <- Inf
+    
+    if(length(short_tp_touch) > 0 & length(short_sl_touch) > 0) {
+      # Beide Barrieren werden berührt - welche zuerst?
+      if(short_tp_touch[1] < short_sl_touch[1]) {
+        short_profitable <- TRUE
+        short_bars <- short_tp_touch[1]
+      }
+    } else if(length(short_tp_touch) > 0) {
+      # Nur TP berührt, kein SL
+      short_profitable <- TRUE
+      short_bars <- short_tp_touch[1]
+    }
+    
+    # ==================================================
+    # LABEL ASSIGNMENT LOGIK
+    # ==================================================
+    if(long_profitable & !short_profitable) {
+      # Nur Long profitabel
+      dt$label[i] <- 1
+      dt$exit_reason[i] <- "Long_Only"
       
-      # Exit beim letzten verfügbaren Zeitpunkt vor/bei 22:30
-      exit_idx <- future_indices[length(future_indices)]
-      exit_price <- data$close[exit_idx]
-      exit_log_price <- data$log_close[exit_idx]
-      returns[i] <- (exit_price - entry_price) / entry_price
-      log_returns[i] <- exit_log_price - entry_log_price  # Log Return
-      exit_time_char[i] <- format(data$time[exit_idx], "%Y-%m-%d %H:%M:%S")
+    } else if(!long_profitable & short_profitable) {
+      # Nur Short profitabel
+      dt$label[i] <- -1
+      dt$exit_reason[i] <- "Short_Only"
+      
+    } else if(long_profitable & short_profitable) {
+      # BEIDE profitabel - wähle die SCHNELLERE Richtung
+      if(long_bars < short_bars) {
+        dt$label[i] <- 1
+        dt$exit_reason[i] <- "Long_Faster"
+      } else {
+        dt$label[i] <- -1
+        dt$exit_reason[i] <- "Short_Faster"
+      }
+      
+    } else {
+      # BEIDE unprofitabel
+      dt$label[i] <- 0
+      dt$exit_reason[i] <- "No_Profit"
     }
   }
   
-  data %>%
-    mutate(
-      atr = as.numeric(atr),
-      tb_barrier_distance = barrier_distances,
-      tb_barrier_pct = barrier_distances / close,  # Barrier in %
-      tb_upper_barrier = upper_barriers,
-      tb_lower_barrier = lower_barriers,
-      tb_upper_barrier_log = upper_barriers_log,
-      tb_lower_barrier_log = lower_barriers_log,
-      tb_label = labels,
-      tb_barrier = barrier_touched,
-      tb_bars_held = bars_held,
-      tb_return = returns,           # Einfacher Return
-      tb_log_return = log_returns,   # Log Return
-      tb_entry_time = entry_time_char,
-      tb_exit_time = exit_time_char
-    )
+  # Nur vollständig gelabelte Daten zurückgeben
+  return(dt[!is.na(label)])
 }
 
-# Anwenden der Symmetrischen Triple Barrier Methode
-df_labeled <- triple_barrier_labeling(df_raw)
-
-# Speichern der gelabelten Daten
-write_csv(df_labeled, file.path(output_path, paste0("triplebarrier_labelled_", EPIC, "_", INTERVAL, ".csv")))
-
 # ==============================================================================
-# 2. STATISTIKEN
+# 2. LABELING DURCHFÜHREN
 # ==============================================================================
 
-# Triple Barrier Statistiken
-tb_stats <- df_labeled %>%
-  filter(!is.na(tb_label)) %>%
-  group_by(tb_label) %>%
-  summarise(
-    count = n(),
-    percentage = n() / nrow(filter(df_labeled, !is.na(tb_label))) * 100,
-    mean_return = mean(tb_return, na.rm = TRUE),
-    mean_log_return = mean(tb_log_return, na.rm = TRUE),
-    mean_barrier_pct = mean(tb_barrier_pct, na.rm = TRUE) * 100,
-    median_bars = median(tb_bars_held, na.rm = TRUE),
-    .groups = "drop"
-  ) %>%
-  mutate(label_name = case_when(
-    tb_label == -1 ~ "Short (Lower Barrier)",
-    tb_label == 0 ~ "Neutral (Time)",
-    tb_label == 1 ~ "Long (Upper Barrier)"
-  ))
+cat("\n")
+cat(paste(rep("=", 70), collapse = ""), "\n")
+cat("  STARTE DIRECTIONAL LABELING\n")
+cat(paste(rep("=", 70), collapse = ""), "\n\n")
 
-print("=== SYMMETRISCHE TRIPLE BARRIER STATISTIKEN ===")
-print(tb_stats)
+tic()
+labelled_dt <- create_directional_labels(df_test)
+toc()
 
-# Log Return Vergleich
-log_return_comparison <- df_labeled %>%
-  filter(!is.na(tb_log_return)) %>%
-  summarise(
-    mean_simple_return = mean(tb_return, na.rm = TRUE),
-    mean_log_return = mean(tb_log_return, na.rm = TRUE),
-    sd_simple_return = sd(tb_return, na.rm = TRUE),
-    sd_log_return = sd(tb_log_return, na.rm = TRUE)
+cat("\nLabeling abgeschlossen!\n")
+cat("Anzahl gelabelter Observations:", nrow(labelled_dt), "\n")
+
+# ==============================================================================
+# 3. DETAILLIERTE STATISTIKEN
+# ==============================================================================
+
+cat("\n")
+cat(paste(rep("=", 70), collapse = ""), "\n")
+cat("  LABEL VERTEILUNG\n")
+cat(paste(rep("=", 70), collapse = ""), "\n\n")
+
+# Absolute Zahlen
+label_counts <- table(labelled_dt$label)
+cat("Absolute Zahlen:\n")
+print(label_counts)
+
+cat("\n\nProzentuale Verteilung:\n")
+label_props <- prop.table(label_counts) * 100
+print(round(label_props, 2))
+
+# Exit Reasons
+cat("\n\n")
+cat(paste(rep("=", 70), collapse = ""), "\n")
+cat("  EXIT REASONS\n")
+cat(paste(rep("=", 70), collapse = ""), "\n\n")
+
+exit_counts <- table(labelled_dt$exit_reason)
+cat("Absolute Zahlen:\n")
+print(exit_counts)
+
+cat("\n\nProzentuale Verteilung:\n")
+exit_props <- prop.table(exit_counts) * 100
+print(round(exit_props, 2))
+
+# Zusammenfassung
+cat("\n\n")
+cat(paste(rep("=", 70), collapse = ""), "\n")
+cat("  ZUSAMMENFASSUNG\n")
+cat(paste(rep("=", 70), collapse = ""), "\n\n")
+
+summary_stats <- data.frame(
+  Metric = c(
+    "Total Observations",
+    "Long Profitable (%)",
+    "Short Profitable (%)",
+    "Unprofitable (%)",
+    "Long-Short Bias (%)"
+  ),
+  Value = c(
+    nrow(labelled_dt),
+    round(sum(labelled_dt$label == 1) / nrow(labelled_dt) * 100, 2),
+    round(sum(labelled_dt$label == -1) / nrow(labelled_dt) * 100, 2),
+    round(sum(labelled_dt$label == 0) / nrow(labelled_dt) * 100, 2),
+    round((sum(labelled_dt$label == 1) - sum(labelled_dt$label == -1)) / 
+            nrow(labelled_dt) * 100, 2)
   )
+)
 
-print("\n=== RETURN VERGLEICH (Simple vs. Log) ===")
-print(log_return_comparison)
+print(summary_stats)
 
-# ATR Statistiken
-atr_stats <- df_labeled %>%
-  filter(!is.na(atr) & atr > 0) %>%
-  summarise(
-    mean_atr = mean(atr, na.rm = TRUE),
-    median_atr = median(atr, na.rm = TRUE),
-    min_atr = min(atr, na.rm = TRUE),
-    max_atr = max(atr, na.rm = TRUE),
-    mean_barrier_pct = mean(tb_barrier_pct, na.rm = TRUE) * 100
-  )
+# ==============================================================================
+# 4. WOCHEN-SPEZIFISCHE ANALYSE
+# ==============================================================================
 
-print("\n=== ATR STATISTIKEN ===")
-print(atr_stats)
+# Zwei Beispiel-Wochen definieren
+week1_start <- as.POSIXct("2025-08-11 00:00:00")
+week1_end <- as.POSIXct("2025-08-15 23:59:59")
 
-# Symmetrie-Check
-symmetry_check <- df_labeled %>%
-  filter(!is.na(tb_label)) %>%
-  count(tb_label) %>%
-  mutate(
-    label_name = case_when(
-      tb_label == -1 ~ "Short",
-      tb_label == 0 ~ "Neutral", 
-      tb_label == 1 ~ "Long"
+week2_start <- as.POSIXct("2025-09-08 00:00:00")
+week2_end <- as.POSIXct("2025-09-12 23:59:59")
+
+# Funktion zur Wochen-Analyse
+analyze_week <- function(dt, start_date, end_date, week_name) {
+  
+  week_data <- dt[time >= start_date & time <= end_date]
+  
+  cat("\n")
+  cat(paste(rep("-", 70), collapse = ""), "\n")
+  cat(paste0(week_name, ": ", format(start_date, "%d.%m.%Y"), 
+             " bis ", format(end_date, "%d.%m.%Y"), "\n"))
+  cat(paste(rep("-", 70), collapse = ""), "\n")
+  
+  cat("Anzahl Observations:", nrow(week_data), "\n\n")
+  
+  cat("Label Verteilung:\n")
+  print(table(week_data$label))
+  
+  cat("\nProzentual:\n")
+  print(round(prop.table(table(week_data$label)) * 100, 2))
+  
+  return(week_data)
+}
+
+cat("\n\n")
+cat(paste(rep("=", 70), collapse = ""), "\n")
+cat("  WOCHEN-SPEZIFISCHE ANALYSE\n")
+cat(paste(rep("=", 70), collapse = ""), "\n")
+
+week1_data <- analyze_week(labelled_dt, week1_start, week1_end, "Woche 1")
+week2_data <- analyze_week(labelled_dt, week2_start, week2_end, "Woche 2")
+
+# ==============================================================================
+# 5. VISUALISIERUNGEN
+# ==============================================================================
+
+library(ggplot2)
+library(gridExtra)
+library(grid)
+
+# Funktion: Preis + Labels visualisieren
+plot_labels_on_price <- function(dt, week_start, week_end, week_name) {
+  
+  week_data <- dt[time >= week_start & time <= week_end]
+  
+  p <- ggplot(week_data, aes(x = time)) +
+    # Preis-Linie
+    geom_line(aes(y = close), color = "gray30", size = 0.5, alpha = 0.7) +
+    
+    # Long Labels (grün)
+    geom_point(data = week_data[label == 1], 
+               aes(y = close, color = "Long Profitable"), 
+               size = 2, alpha = 0.6) +
+    
+    # Short Labels (rot)
+    geom_point(data = week_data[label == -1], 
+               aes(y = close, color = "Short Profitable"), 
+               size = 2, alpha = 0.6) +
+    
+    # Unprofitable Labels (grau)
+    geom_point(data = week_data[label == 0], 
+               aes(y = close, color = "Unprofitable"), 
+               size = 1.5, alpha = 0.4) +
+    
+    scale_color_manual(
+      name = "Label",
+      values = c(
+        "Long Profitable" = "#2ecc71",    # Grün
+        "Short Profitable" = "#e74c3c",   # Rot
+        "Unprofitable" = "#95a5a6"        # Grau
+      )
+    ) +
+    
+    labs(
+      title = paste0("Directional Labels: ", week_name),
+      subtitle = paste0(format(week_start, "%d.%m"), " - ", 
+                        format(week_end, "%d.%m.%Y")),
+      x = "Zeit",
+      y = EPIC
+    ) +
+    
+    theme_minimal(base_size = 12) +
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5),
+      plot.subtitle = element_text(hjust = 0.5),
+      panel.grid.minor = element_blank(),
+      legend.position = "bottom"
     )
+  
+  return(p)
+}
+
+cat("\n\nErstelle Plots...\n")
+
+# Plot 1: Woche 1
+p1 <- plot_labels_on_price(labelled_dt, week1_start, week1_end, "Woche 1")
+print(p1)
+
+ggsave(
+  filename = file.path(output_path, "directional_week1.png"),
+  plot = p1,
+  width = 12,
+  height = 6,
+  dpi = 300,
+  bg = "white"
+)
+
+# Plot 2: Woche 2
+p2 <- plot_labels_on_price(labelled_dt, week2_start, week2_end, "Woche 2")
+print(p2)
+
+ggsave(
+  filename = file.path(output_path, "directional_week2.png"),
+  plot = p2,
+  width = 12,
+  height = 6,
+  dpi = 300,
+  bg = "white"
+)
+
+# Combined Plot
+combined_plot <- grid.arrange(
+  p1, p2,
+  ncol = 1,
+  nrow = 2,
+  top = textGrob(
+    "Directional Triple Barrier Labels: Two Trading Weeks\nWoche 1: 11.-15. August | Woche 2: 8.-12. September 2025",
+    gp = gpar(fontsize = 14, fontface = "bold")
   )
+)
 
-print("\n=== SYMMETRIE-CHECK (Label Verteilung) ===")
-print(symmetry_check)
+ggsave(
+  filename = file.path(output_path, "directional_comparison_2weeks.png"),
+  plot = combined_plot,
+  width = 14,
+  height = 10,
+  dpi = 300,
+  bg = "white"
+)
+
+cat("Wochen-Plots gespeichert!\n")
 
 # ==============================================================================
-# 3. VISUALISIERUNGEN
+# 6. ROLLING LABEL DISTRIBUTION
+# ==============================================================================
+# Zeigt wie sich die Label-Verteilung über die Zeit entwickelt
+# Window = 96 Bars = 1 Handelstag (bei 15-Minuten-Intervallen)
 # ==============================================================================
 
-# Farbpalette definieren
-colors_labels <- c("-1" = "#E74C3C", "0" = "#95A5A6", "1" = "#27AE60")
+plot_rolling_label_distribution <- function(dt, window = 96) {
+  
+  dt_copy <- copy(dt)
+  
+  # Rolling Proportions für jedes Label berechnen
+  dt_copy[, long_pct := frollapply(
+    label,
+    n = window,
+    FUN = function(x) sum(x == 1) / length(x) * 100,
+    align = "right"
+  )]
+  
+  dt_copy[, short_pct := frollapply(
+    label,
+    n = window,
+    FUN = function(x) sum(x == -1) / length(x) * 100,
+    align = "right"
+  )]
+  
+  dt_copy[, unprofitable_pct := frollapply(
+    label,
+    n = window,
+    FUN = function(x) sum(x == 0) / length(x) * 100,
+    align = "right"
+  )]
+  
+  # Plot erstellen
+  p <- ggplot(dt_copy, aes(x = time)) +
+    geom_line(aes(y = long_pct, color = "Long"), 
+              size = 1, alpha = 0.8) +
+    geom_line(aes(y = short_pct, color = "Short"), 
+              size = 1, alpha = 0.8) +
+    geom_line(aes(y = unprofitable_pct, color = "Unprofitable"), 
+              size = 0.7, alpha = 0.6) +
+    
+    scale_color_manual(
+      name = "Label Type",
+      values = c(
+        "Long" = "#2ecc71",
+        "Short" = "#e74c3c",
+        "Unprofitable" = "#95a5a6"
+      )
+    ) +
+    
+    labs(
+      title = "Rolling Label Distribution Over Time",
+      subtitle = paste0("Window: ", window, " bars (≈ 1 Handelstag)"),
+      x = "Zeit",
+      y = "Prozent (%)"
+    ) +
+    
+    theme_minimal(base_size = 11) +
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5),
+      plot.subtitle = element_text(hjust = 0.5),
+      legend.position = "bottom"
+    ) +
+    ylim(0, 100)
+  
+  return(p)
+}
 
-# Plot 1: Triple Barrier Labels über Zeit mit Log Preisen
-p1 <- df_labeled %>%
-  filter(!is.na(tb_label)) %>%
-  ggplot(aes(x = time, y = log_close)) +
-  geom_line(color = "gray40", alpha = 0.5) +
-  geom_point(aes(color = factor(tb_label)), size = 1.5, alpha = 0.6) +
-  scale_color_manual(values = colors_labels,
-                     labels = c("Short (-1)", "Neutral (0)", "Long (1)"),
-                     name = "Label") +
-  labs(title = "Symmetrische Triple Barrier Labeling mit ATR (Log Prices)",
-       subtitle = sprintf("Beide Barriers: 3x ATR (symmetrisch) | Täglicher Close: 22:30"),
-       x = "Zeit", y = "Log(Gold Preis)") +
-  theme_minimal() +
-  theme(legend.position = "bottom",
-        plot.title = element_text(face = "bold", size = 14))
+p_rolling <- plot_rolling_label_distribution(labelled_dt)
+print(p_rolling)
 
-# Plot 4: Return Distribution Comparison (Simple vs Log)
-p4_simple <- df_labeled %>%
-  filter(!is.na(tb_return)) %>%
-  ggplot(aes(x = tb_return, fill = factor(tb_label))) +
-  geom_histogram(bins = 50, alpha = 0.7, position = "identity") +
-  scale_fill_manual(values = colors_labels,
-                    labels = c("Short (-1)", "Neutral (0)", "Long (1)"),
-                    name = "Label") +
-  geom_vline(xintercept = 0, linetype = "dashed", color = "black") +
-  labs(title = "Simple Returns",
-       x = "Simple Return", y = "Häufigkeit") +
-  theme_minimal() +
-  theme(legend.position = "bottom",
-        plot.title = element_text(face = "bold", size = 12))
+ggsave(
+  filename = file.path(output_path, "rolling_label_distribution.png"),
+  plot = p_rolling,
+  width = 14,
+  height = 6,
+  dpi = 300,
+  bg = "white"
+)
 
-p4_log <- df_labeled %>%
-  filter(!is.na(tb_log_return)) %>%
-  ggplot(aes(x = tb_log_return, fill = factor(tb_label))) +
-  geom_histogram(bins = 50, alpha = 0.7, position = "identity") +
-  scale_fill_manual(values = colors_labels,
-                    labels = c("Short (-1)", "Neutral (0)", "Long (1)"),
-                    name = "Label") +
-  geom_vline(xintercept = 0, linetype = "dashed", color = "black") +
-  labs(title = "Log Returns",
-       x = "Log Return", y = "Häufigkeit") +
-  theme_minimal() +
-  theme(legend.position = "bottom",
-        plot.title = element_text(face = "bold", size = 12))
+cat("Rolling distribution plot gespeichert!\n")
 
+# ==============================================================================
+# 7. DATEN SPEICHERN
+# ==============================================================================
 
+write_csv(labelled_dt, file.path(output_path, directional_name))
 
-# Detailansicht: Zoom auf eine Woche (Log Prices)
-zoom_start <- df_labeled$time[500]
-zoom_end <- zoom_start + days(7)
+cat("\n\n")
+cat(paste(rep("=", 70), collapse = ""), "\n")
+cat("  DATEN GESPEICHERT\n")
+cat(paste(rep("=", 70), collapse = ""), "\n\n")
 
-p6_a <- df_labeled %>%
-  filter(time >= zoom_start & time <= zoom_end, !is.na(tb_label)) %>%
-  ggplot(aes(x = time, y = log_close)) +
-  geom_ribbon(aes(ymin = tb_lower_barrier_log, ymax = tb_upper_barrier_log), 
-              fill = "lightblue", alpha = 0.2) +
-  geom_line(color = "gray40", size = 0.8) +
-  geom_line(aes(y = tb_upper_barrier_log), color = "#27AE60", linetype = "dashed", alpha = 0.5) +
-  geom_line(aes(y = tb_lower_barrier_log), color = "#E74C3C", linetype = "dashed", alpha = 0.5) +
-  geom_point(aes(color = factor(tb_label)), size = 3, alpha = 0.7) +
-  scale_color_manual(values = colors_labels,
-                     labels = c("Short (-1)", "Neutral (0)", "Long (1)"),
-                     name = "Triple Barrier") +
-  labs(title = "Detailansicht: Symmetrische Barriers in Log Space (7 Tage)",
-       subtitle = "Grüne Linie = Upper Barrier (log) | Rote Linie = Lower Barrier (log)",
-       x = "Zeit", y = "Log(Gold Preis)") +
-  theme_minimal() +
-  theme(legend.position = "bottom",
-        plot.title = element_text(face = "bold", size = 12))
+cat("Gespeicherte CSV:\n")
+cat("  -", directional_name, "\n\n")
 
-# ATR über Zeit
-p6_b <- df_labeled %>%
-  filter(!is.na(atr) & atr > 0) %>%
-  ggplot(aes(x = time, y = atr)) +
-  geom_line(color = "#E74C3C", size = 0.8) +
-  geom_smooth(method = "loess", se = TRUE, color = "#3498DB", alpha = 0.2) +
-  labs(title = "ATR (14) über Zeit",
-       subtitle = "Average True Range bestimmt beide Barrier-Abstände",
-       x = "Zeit", y = "ATR (USD)") +
-  theme_minimal() +
-  theme(plot.title = element_text(face = "bold", size = 12))
+cat("Gespeicherte Plots:\n")
+cat("  - directional_week1.png\n")
+cat("  - directional_week2.png\n")
+cat("  - directional_comparison_2weeks.png\n")
+cat("  - rolling_label_distribution.png\n\n")
+
+cat("Speicherort:", output_path, "\n\n")
+cat(paste(rep("=", 70), collapse = ""), "\n")
+cat("  LABELING ABGESCHLOSSEN!\n")
+cat(paste(rep("=", 70), collapse = ""), "\n")
